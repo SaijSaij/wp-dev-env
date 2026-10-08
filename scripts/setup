@@ -1,0 +1,80 @@
+#!/usr/bin/env bash
+# Idempotent setup: builds images, installs Composer dependencies of the linked
+# projects, starts the containers, installs WordPress and activates the
+# configured theme and plugins.
+set -euo pipefail
+cd "$(dirname "${BASH_SOURCE[0]}")/.."
+
+if [[ ! -f .env ]]; then
+    echo "ERROR: $(pwd)/.env not found. Copy .env.example to .env and adjust it." >&2
+    exit 1
+fi
+set -a
+# shellcheck source=/dev/null
+source .env
+set +a
+
+if [[ ! -d "${WORKSPACE_DIR}" ]]; then
+    echo "ERROR: WORKSPACE_DIR '${WORKSPACE_DIR}' not found (relative to $(pwd))." >&2
+    exit 1
+fi
+
+IFS=',' read -r -a themes <<< "${WP_THEMES}"
+IFS=',' read -r -a plugins <<< "${WP_PLUGINS}"
+
+for project in "${themes[@]}" "${plugins[@]}"; do
+    if [[ ! -d "${WORKSPACE_DIR}/${project}" ]]; then
+        echo "ERROR: project '${project}' not found in WORKSPACE_DIR ($(realpath -m "${WORKSPACE_DIR}/${project}"))." >&2
+        exit 1
+    fi
+done
+
+# Created up front so they belong to the host user, not to the Docker daemon (root).
+mkdir -p data/db data/uploads
+
+docker compose build
+
+for project in "${themes[@]}" "${plugins[@]}"; do
+    if [[ -f "${WORKSPACE_DIR}/${project}/composer.json" ]]; then
+        echo "composer install: ${project}"
+        docker compose run --rm tools composer install --working-dir="/workspace/${project}" --no-interaction
+    else
+        echo "composer install: ${project} has no composer.json, nothing to install"
+    fi
+done
+
+docker compose up -d --wait traefik db wordpress mail
+
+if ! docker compose exec -T wordpress curl -fsS -o /dev/null "${WP_URL}/readme.html"; then
+    echo "ERROR: ${WP_URL} is not reachable from inside the wordpress container, so WP-Cron and other loopback requests fail. WP_URL must be http://${WP_HOST} and HTTP_PORT must be 80." >&2
+    exit 1
+fi
+
+wp() {
+    docker compose exec -T -u www-data wordpress wp "$@"
+}
+
+if wp core is-installed; then
+    echo "WordPress is already installed."
+else
+    wp core install \
+        --url="${WP_URL}" \
+        --title="${WP_TITLE}" \
+        --admin_user="${WP_ADMIN_USER}" \
+        --admin_password="${WP_ADMIN_PASSWORD}" \
+        --admin_email="${WP_ADMIN_EMAIL}" \
+        --skip-email
+fi
+
+wp rewrite structure '/%postname%/'
+wp theme activate "${WP_ACTIVE_THEME}"
+if (( ${#plugins[@]} > 0 )); then
+    wp plugin activate "${plugins[@]}"
+fi
+
+echo
+echo "WordPress $(wp core version) running at ${WP_URL}"
+echo "Active theme:   $(wp theme list --status=active --field=name)"
+echo "Active plugins: $(wp plugin list --status=active --field=name | paste -sd ' ' -)"
+echo "Mailpit:        http://${MAILPIT_HOST}"
+echo "Traefik:        http://${TRAEFIK_HOST}"

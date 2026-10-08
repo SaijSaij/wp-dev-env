@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+# Restores a defined state: stops all containers, deletes database and uploads,
+# then runs the setup again.
+set -euo pipefail
+cd "$(dirname "${BASH_SOURCE[0]}")/.."
+
+docker compose --profile '*' down --remove-orphans
+rm -rf data/db data/uploads
+
+exec scripts/setup

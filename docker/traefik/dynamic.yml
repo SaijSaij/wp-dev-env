@@ -1,0 +1,26 @@
+# Routes by host name. Host names come from .env and are passed to the traefik
+# service; compose.yaml requires them (${VAR:?}), so they are never empty here.
+http:
+  routers:
+    wordpress:
+      rule: 'Host(`{{ env "WP_HOST" }}`)'
+      entryPoints: [web]
+      service: wordpress
+    mailpit:
+      rule: 'Host(`{{ env "MAILPIT_HOST" }}`)'
+      entryPoints: [web]
+      service: mailpit
+    dashboard:
+      rule: 'Host(`{{ env "TRAEFIK_HOST" }}`)'
+      entryPoints: [web]
+      service: api@internal
+
+  services:
+    wordpress:
+      loadBalancer:
+        servers:
+          - url: http://wordpress:80
+    mailpit:
+      loadBalancer:
+        servers:
+          - url: http://mail:8025
