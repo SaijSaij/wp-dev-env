@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Idempotent setup: builds images, installs Composer dependencies of the linked
-# projects, starts the containers, installs WordPress and activates the
-# configured theme and plugins.
+# Idempotent setup: builds images, installs Composer and npm dependencies of the
+# linked projects and builds their scripts, starts the containers, installs
+# WordPress and activates the configured theme and plugins.
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
@@ -30,7 +30,7 @@ for project in "${themes[@]}" "${plugins[@]}"; do
 done
 
 # Created up front so they belong to the host user, not to the Docker daemon (root).
-mkdir -p data/db data/uploads
+mkdir -p data/db data/uploads data/e2e
 
 docker compose build
 
@@ -40,6 +40,15 @@ for project in "${themes[@]}" "${plugins[@]}"; do
         docker compose run --rm tools composer install --working-dir="/workspace/${project}" --no-interaction
     else
         echo "composer install: ${project} has no composer.json, nothing to install"
+    fi
+    # After Composer: a project's build may use files from its vendor directory.
+    if [[ -f "${WORKSPACE_DIR}/${project}/package.json" ]]; then
+        if [[ ! -f "${WORKSPACE_DIR}/${project}/package-lock.json" ]]; then
+            echo "ERROR: ${project} has a package.json but no package-lock.json; run npm install in the project once and commit the lock file." >&2
+            exit 1
+        fi
+        echo "npm ci && npm run build: ${project}"
+        docker compose run --rm tools sh -c "cd /workspace/${project} && npm ci --no-audit --no-fund && npm run build --if-present"
     fi
 done
 

@@ -12,6 +12,11 @@ services:
       - --ping=true
     ports:
       - "${HTTP_PORT:?}:80"
+    networks:
+      default:
+        # Containers such as e2e reach WordPress at WP_URL through Traefik.
+        aliases:
+          - ${WP_HOST:?}
     environment:
       WP_HOST: ${WP_HOST:?}
       MAILPIT_HOST: ${MAILPIT_HOST:?}
@@ -91,6 +96,29 @@ services:
 
   mail:
     image: axllent/mailpit:latest
+
+  # Browser tests of the projects (Playwright), e.g.
+  # docker compose run --rm e2e npm --prefix /workspace/<project> run test:e2e
+  e2e:
+    image: mcr.microsoft.com/playwright:v${PLAYWRIGHT_VERSION:?}-noble
+    profiles: [e2e]
+    user: "${HOST_UID:?}:${HOST_GID:?}"
+    depends_on:
+      - traefik
+      - wordpress
+    environment:
+      HOME: /tmp
+      PLAYWRIGHT_VERSION: ${PLAYWRIGHT_VERSION:?}
+      WP_BASE_URL: ${WP_URL:?}
+      WP_USERNAME: ${WP_ADMIN_USER:?}
+      WP_PASSWORD: ${WP_ADMIN_PASSWORD:?}
+      # Browsers resolve *.localhost to the loopback address themselves; send WP_HOST to Traefik.
+      E2E_BROWSER_HOST_RULES: MAP ${WP_HOST:?} traefik
+      # The workspace is read-only; test results and login state go here (data/e2e on the host).
+      E2E_OUTPUT_DIR: /results
+    volumes:
+      - ${WORKSPACE_DIR:?}:/workspace:ro
+      - ./data/e2e:/results
 
 volumes:
   tools-cache:
