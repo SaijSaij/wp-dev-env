@@ -57,11 +57,11 @@ docker compose build --pull && docker compose up -d                          # u
 ### Release test
 
 ```sh
-scripts/release-test --theme <path/to/theme.zip> [--plugin <path/to/plugin.zip>]...
+scripts/release-test --theme <path/to/theme.zip> [--child-theme <path/to/child.zip>] [--plugin <path/to/plugin.zip>]...
 docker compose --profile release rm --stop --force wordpress-release db-release   # stop
 ```
 
-Starts a fresh WordPress (profile `release`: no workspace mounts, database and WordPress on tmpfs, nothing persisted), installs and activates the theme ZIP and every plugin ZIP with WP-CLI, removes the write permissions of their directories (the script checks that writing as `www-data` fails) and checks the front page. It runs next to the development site. Browser tests run against it with the `e2e` service and overridden variables:
+Starts a fresh WordPress (profile `release`: no workspace mounts, database and WordPress on tmpfs, nothing persisted), installs and activates the theme ZIP – or, with `--child-theme`, installs it as parent and activates the child theme ZIP on top of it (the script checks that the child names that parent) – and every plugin ZIP with WP-CLI, removes the write permissions of their directories (the script checks that writing as `www-data` fails) and checks the front page. It runs next to the development site. Browser tests run against it with the `e2e` service and overridden variables:
 
 ```sh
 set -a; . ./.env; set +a

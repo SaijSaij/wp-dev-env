@@ -1,25 +1,32 @@
 #!/usr/bin/env bash
-# Release test: installs release ZIPs – one theme and any number of plugins –
-# into a fresh, plain WordPress (profile release, no workspace mounts, nothing
-# persisted), activates them and makes their directories read-only. The site
+# Release test: installs release ZIPs – one theme, optionally a child theme of
+# it, and any number of plugins – into a fresh, plain WordPress (profile release,
+# no workspace mounts, nothing persisted), activates them (the child theme, if
+# given, instead of the theme) and makes their directories read-only. The site
 # runs at WP_RELEASE_URL.
 #
-# Usage: scripts/release-test --theme <theme.zip> [--plugin <plugin.zip>]...
+# Usage: scripts/release-test --theme <theme.zip> [--child-theme <child.zip>] [--plugin <plugin.zip>]...
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
 usage() {
-    echo "Usage: scripts/release-test --theme <theme.zip> [--plugin <plugin.zip>]..." >&2
+    echo "Usage: scripts/release-test --theme <theme.zip> [--child-theme <child.zip>] [--plugin <plugin.zip>]..." >&2
     exit 2
 }
 
 theme_zip=""
+child_zip=""
 plugin_zips=()
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --theme)
             [[ $# -ge 2 && -z "${theme_zip}" ]] || usage
             theme_zip="$2"
+            shift 2
+            ;;
+        --child-theme)
+            [[ $# -ge 2 && -z "${child_zip}" ]] || usage
+            child_zip="$2"
             shift 2
             ;;
         --plugin)
@@ -34,7 +41,10 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 [[ -n "${theme_zip}" ]] || usage
-for zip in "${theme_zip}" "${plugin_zips[@]}"; do
+zips=("${theme_zip}")
+[[ -z "${child_zip}" ]] || zips+=("${child_zip}")
+zips+=("${plugin_zips[@]}")
+for zip in "${zips[@]}"; do
     if [[ ! -f "${zip}" ]]; then
         echo "ERROR: release ZIP '${zip}' not found." >&2
         exit 1
@@ -52,7 +62,7 @@ set +a
 
 # The container sees the ZIPs below /release (data/release, read-only).
 mkdir -p data/release
-for zip in "${theme_zip}" "${plugin_zips[@]}"; do
+for zip in "${zips[@]}"; do
     cp "${zip}" "data/release/$(basename "${zip}")"
 done
 
@@ -88,8 +98,34 @@ read_only() {
     fi
 }
 
-wp theme install "/release/$(basename "${theme_zip}")" --activate
-theme="$(wp theme list --status=active --field=name)"
+# The directory name of the theme a ZIP installed, from the theme list before and after.
+install_theme() {
+    local before installed
+    before="$(wp theme list --field=name | sort)"
+    wp theme install "/release/$(basename "$1")" >&2
+    installed="$(comm -13 <(echo "${before}") <(wp theme list --field=name | sort))"
+    if [[ -z "${installed}" || "${installed}" == *$'\n'* ]]; then
+        echo "ERROR: cannot tell which theme $1 installed." >&2
+        exit 1
+    fi
+    echo "${installed}"
+}
+
+# The parent theme first: WordPress would try to download a missing parent theme from wordpress.org.
+theme="$(install_theme "${theme_zip}")"
+child=""
+if [[ -n "${child_zip}" ]]; then
+    child="$(install_theme "${child_zip}")"
+    parent="$(wp theme get "${child}" --field=template)"
+    if [[ "${parent}" != "${theme}" ]]; then
+        echo "ERROR: the child theme ${child} from $(basename "${child_zip}") names the parent theme '${parent}', but $(basename "${theme_zip}") installed ${theme}." >&2
+        exit 1
+    fi
+    wp theme activate "${child}"
+    read_only "/var/www/html/wp-content/themes/${child}"
+else
+    wp theme activate "${theme}"
+fi
 read_only "/var/www/html/wp-content/themes/${theme}"
 
 plugins=()
@@ -113,7 +149,12 @@ fi
 
 echo
 echo "WordPress $(wp core version) running at ${WP_RELEASE_URL}"
-echo "Active theme:   ${theme} $(wp theme get "${theme}" --field=version) from $(basename "${theme_zip}") (read-only)"
+if [[ -n "${child}" ]]; then
+    echo "Active theme:   ${child} $(wp theme get "${child}" --field=version) from $(basename "${child_zip}") (read-only)"
+    echo "Parent theme:   ${theme} $(wp theme get "${theme}" --field=version) from $(basename "${theme_zip}") (read-only)"
+else
+    echo "Active theme:   ${theme} $(wp theme get "${theme}" --field=version) from $(basename "${theme_zip}") (read-only)"
+fi
 for plugin in "${plugins[@]}"; do
     echo "Active plugin:  ${plugin} $(wp plugin get "${plugin}" --field=version) (read-only)"
 done
