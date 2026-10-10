@@ -21,6 +21,44 @@ fi
 
 IFS=',' read -r -a themes <<< "${WP_THEMES}"
 IFS=',' read -r -a plugins <<< "${WP_PLUGINS}"
+IFS=',' read -r -a package_links <<< "${WP_PACKAGE_LINKS}"
+
+for link in "${package_links[@]}"; do
+    if [[ ! "${link}" =~ ^[a-z0-9_.-]+/[a-z0-9_.-]+=[^/=]+$ ]]; then
+        echo "ERROR: WP_PACKAGE_LINKS entry '${link}' must have the form vendor/package=directory." >&2
+        exit 1
+    fi
+    if [[ ! -d "${WORKSPACE_DIR}/${link#*=}" ]]; then
+        echo "ERROR: directory '${link#*=}' of WP_PACKAGE_LINKS entry '${link}' not found in WORKSPACE_DIR." >&2
+        exit 1
+    fi
+done
+
+# Replaces a Composer package of a project by a relative symlink to its checkout in the
+# workspace, so changes take effect immediately. Lock file and composer.json stay untouched;
+# Composer removes only the link when it installs another version of the package.
+link_packages() {
+    local project="$1" link package directory target
+    for link in "${package_links[@]}"; do
+        package="${link%%=*}"
+        directory="${link#*=}"
+        target="${WORKSPACE_DIR}/${project}/vendor/${package}"
+        if [[ -L "${target}" && "$(readlink "${target}")" == "../../../${directory}" ]]; then
+            echo "package link: ${project} uses ${package} from ${directory}"
+            continue
+        fi
+        if [[ ! -e "${target}" && ! -L "${target}" ]]; then
+            continue
+        fi
+        if [[ -L "${target}" ]]; then
+            rm "${target}"
+        else
+            rm -r -- "${target}"
+        fi
+        ln -s "../../../${directory}" "${target}"
+        echo "package link: ${project} uses ${package} from ${directory}"
+    done
+}
 
 for project in "${themes[@]}" "${plugins[@]}"; do
     if [[ ! -d "${WORKSPACE_DIR}/${project}" ]]; then
@@ -38,6 +76,7 @@ for project in "${themes[@]}" "${plugins[@]}"; do
     if [[ -f "${WORKSPACE_DIR}/${project}/composer.json" ]]; then
         echo "composer install: ${project}"
         docker compose run --rm tools composer install --working-dir="/workspace/${project}" --no-interaction
+        link_packages "${project}"
     else
         echo "composer install: ${project} has no composer.json, nothing to install"
     fi

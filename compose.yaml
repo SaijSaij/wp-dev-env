@@ -17,8 +17,10 @@ services:
         # Containers such as e2e reach WordPress at WP_URL through Traefik.
         aliases:
           - ${WP_HOST:?}
+          - ${WP_RELEASE_HOST:?}
     environment:
       WP_HOST: ${WP_HOST:?}
+      WP_RELEASE_HOST: ${WP_RELEASE_HOST:?}
       MAILPIT_HOST: ${MAILPIT_HOST:?}
       TRAEFIK_HOST: ${TRAEFIK_HOST:?}
     volumes:
@@ -86,6 +88,61 @@ services:
       - ${WORKSPACE_DIR:?}:/workspace:ro
       - ./data/uploads:/var/www/html/wp-content/uploads
 
+  # Release test (profile release, scripts/release-test): plain WordPress without
+  # workspace mounts; a release ZIP is installed with WP-CLI. Nothing is persisted.
+  db-release:
+    image: mariadb:lts
+    profiles: [release]
+    environment:
+      MARIADB_DATABASE: ${DB_NAME:?}
+      MARIADB_USER: ${DB_USER:?}
+      MARIADB_PASSWORD: ${DB_PASSWORD:?}
+      MARIADB_RANDOM_ROOT_PASSWORD: "1"
+    tmpfs:
+      - /var/lib/mysql
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+      start_period: 30s
+
+  wordpress-release:
+    build:
+      context: docker/wordpress
+      args:
+        HOST_UID: ${HOST_UID:?}
+        HOST_GID: ${HOST_GID:?}
+    profiles: [release]
+    depends_on:
+      db-release:
+        condition: service_healthy
+    extra_hosts:
+      - "${WP_RELEASE_HOST:?}:127.0.0.1"
+    environment:
+      WORDPRESS_DB_HOST: db-release
+      WORDPRESS_DB_NAME: ${DB_NAME:?}
+      WORDPRESS_DB_USER: ${DB_USER:?}
+      WORDPRESS_DB_PASSWORD: ${DB_PASSWORD:?}
+      # Same debug settings as development, so browser tests see the same error details.
+      WORDPRESS_DEBUG: "1"
+      WORDPRESS_CONFIG_EXTRA: |
+        define('WP_HOME', '${WP_RELEASE_URL:?}');
+        define('WP_SITEURL', '${WP_RELEASE_URL:?}');
+        define('WP_ENVIRONMENT_TYPE', 'local');
+        define('WP_DEBUG_LOG', '/dev/stderr');
+        define('AUTOMATIC_UPDATER_DISABLED', true);
+        define('WP_AUTO_UPDATE_CORE', false);
+      XDEBUG_MODE: "off"
+      # No workspace projects: the release ZIP is installed instead.
+      WP_THEMES: ""
+      WP_PLUGINS: ""
+    tmpfs:
+      - /var/www/html:mode=0755
+    volumes:
+      # Release ZIPs to install (scripts/release-test copies them here).
+      - ./data/release:/release:ro
+
   tools:
     build: docker/tools
     profiles: [tools]
@@ -114,6 +171,9 @@ services:
       WP_PASSWORD: ${WP_ADMIN_PASSWORD:?}
       # Browsers resolve *.localhost to the loopback address themselves; send WP_HOST to Traefik.
       E2E_BROWSER_HOST_RULES: MAP ${WP_HOST:?} traefik
+      # dev or release: which site the tests run against. For the release test, override
+      # WP_BASE_URL, E2E_BROWSER_HOST_RULES and E2E_TARGET (see README).
+      E2E_TARGET: dev
       # The workspace is read-only; test results and login state go here (data/e2e on the host).
       E2E_OUTPUT_DIR: /results
     volumes:

@@ -1,0 +1,75 @@
+#!/usr/bin/env bash
+# Release test: installs a theme release ZIP into a fresh, plain WordPress
+# (profile release, no workspace mounts, nothing persisted), activates it and
+# makes the theme directory read-only. The site runs at WP_RELEASE_URL.
+#
+# Usage: scripts/release-test <path/to/theme.zip>
+set -euo pipefail
+cd "$(dirname "${BASH_SOURCE[0]}")/.."
+
+if [[ $# -ne 1 ]]; then
+    echo "Usage: scripts/release-test <path/to/theme.zip>" >&2
+    exit 2
+fi
+zip="$1"
+if [[ ! -f "${zip}" ]]; then
+    echo "ERROR: release ZIP '${zip}' not found." >&2
+    exit 1
+fi
+
+if [[ ! -f .env ]]; then
+    echo "ERROR: $(pwd)/.env not found. Copy .env.example to .env and adjust it." >&2
+    exit 1
+fi
+set -a
+# shellcheck source=/dev/null
+source .env
+set +a
+
+# The container sees the ZIP below /release (data/release, read-only).
+mkdir -p data/release
+name="$(basename "${zip}")"
+cp "${zip}" "data/release/${name}"
+
+# A fresh database and WordPress on every run (both on tmpfs).
+docker compose --profile release rm --stop --force wordpress-release db-release
+docker compose --profile release up -d --wait traefik db-release wordpress-release
+
+if ! docker compose exec -T wordpress-release curl -fsS -o /dev/null "${WP_RELEASE_URL}/readme.html"; then
+    echo "ERROR: ${WP_RELEASE_URL} is not reachable from inside the wordpress-release container. WP_RELEASE_URL must be http://${WP_RELEASE_HOST}." >&2
+    exit 1
+fi
+
+wp() {
+    docker compose exec -T -u www-data wordpress-release wp "$@"
+}
+
+wp core install \
+    --url="${WP_RELEASE_URL}" \
+    --title="Release test" \
+    --admin_user="${WP_ADMIN_USER}" \
+    --admin_password="${WP_ADMIN_PASSWORD}" \
+    --admin_email="${WP_ADMIN_EMAIL}" \
+    --skip-email
+wp rewrite structure '/%postname%/'
+wp theme install "/release/${name}" --activate
+theme="$(wp theme list --status=active --field=name)"
+theme_directory="/var/www/html/wp-content/themes/${theme}"
+
+# Read-only like a deployment without write access: nothing may write into the theme.
+docker compose exec -T wordpress-release chmod -R a-w "${theme_directory}"
+if docker compose exec -T -u www-data wordpress-release touch "${theme_directory}/.write-test" 2>/dev/null; then
+    echo "ERROR: ${theme_directory} is still writable for www-data." >&2
+    exit 1
+fi
+
+status="$(docker compose exec -T wordpress-release curl -sS -o /dev/null -w '%{http_code}' "${WP_RELEASE_URL}/")"
+if [[ "${status}" != "200" ]]; then
+    echo "ERROR: the front page of the release site answers HTTP ${status}." >&2
+    exit 1
+fi
+
+echo
+echo "WordPress $(wp core version) running at ${WP_RELEASE_URL}"
+echo "Active theme:   ${theme} $(wp theme get "${theme}" --field=version) from ${name} (read-only)"
+echo "Stop with:      docker compose --profile release rm --stop --force wordpress-release db-release"
