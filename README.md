@@ -6,7 +6,7 @@ Docker development environment for WordPress themes and plugins. Only Docker is 
 - Traefik on port 80 with host names: `wp-dev.localhost`, `mailpit.localhost`, `traefik.localhost`
 - Mailpit catches all mail sent by WordPress
 - Tools container with PHP 8.5 CLI, Composer, Node and Strauss
-- Release test: a theme ZIP in a fresh, plain WordPress at `wp-release.localhost`
+- Release test: a theme ZIP and plugin ZIPs in a fresh, plain WordPress at `wp-release.localhost`
 
 ## Workspace
 
@@ -57,11 +57,11 @@ docker compose build --pull && docker compose up -d                          # u
 ### Release test
 
 ```sh
-scripts/release-test <path/to/theme.zip>
+scripts/release-test --theme <path/to/theme.zip> [--plugin <path/to/plugin.zip>]...
 docker compose --profile release rm --stop --force wordpress-release db-release   # stop
 ```
 
-Starts a fresh WordPress (profile `release`: no workspace mounts, database and WordPress on tmpfs, nothing persisted), installs and activates the theme ZIP with WP-CLI, removes the write permissions of the theme directory (the script checks that writing as `www-data` fails) and checks the front page. It runs next to the development site. Browser tests run against it with the `e2e` service and overridden variables:
+Starts a fresh WordPress (profile `release`: no workspace mounts, database and WordPress on tmpfs, nothing persisted), installs and activates the theme ZIP and every plugin ZIP with WP-CLI, removes the write permissions of their directories (the script checks that writing as `www-data` fails) and checks the front page. It runs next to the development site. Browser tests run against it with the `e2e` service and overridden variables:
 
 ```sh
 set -a; . ./.env; set +a
