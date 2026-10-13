@@ -91,7 +91,25 @@ for project in "${themes[@]}" "${plugins[@]}"; do
     fi
 done
 
-docker compose up -d --wait traefik db wordpress mail
+# The profile objectcache is enabled only with WP_OBJECT_CACHE=valkey; otherwise Compose
+# would also start valkey as an (optional) dependency of wordpress.
+services=(traefik db wordpress mail)
+profile=()
+case "${WP_OBJECT_CACHE}" in
+    '')
+        docker compose --profile objectcache rm --stop --force valkey
+        ;;
+    valkey)
+        profile=(--profile objectcache)
+        services+=(valkey)
+        ;;
+    *)
+        echo "ERROR: WP_OBJECT_CACHE '${WP_OBJECT_CACHE}' in .env must be empty or 'valkey'." >&2
+        exit 1
+        ;;
+esac
+# A changed WP_OBJECT_CACHE recreates wordpress; its entrypoint installs or omits the drop-in.
+docker compose "${profile[@]}" up -d --wait "${services[@]}"
 
 if ! docker compose exec -T wordpress curl -fsS -o /dev/null "${WP_URL}/readme.html"; then
     echo "ERROR: ${WP_URL} is not reachable from inside the wordpress container, so WP-Cron and other loopback requests fail. WP_URL must be http://${WP_HOST} and HTTP_PORT must be 80." >&2
@@ -124,5 +142,6 @@ echo
 echo "WordPress $(wp core version) running at ${WP_URL}"
 echo "Active theme:   $(wp theme list --status=active --field=name)"
 echo "Active plugins: $(wp plugin list --status=active --field=name | paste -sd ' ' -)"
+echo "Object cache:   $(wp cache type)"
 echo "Mailpit:        http://${MAILPIT_HOST}"
 echo "Traefik:        http://${TRAEFIK_HOST}"

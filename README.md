@@ -2,7 +2,7 @@
 
 Docker development environment for WordPress themes and plugins. Only Docker is required on the host.
 
-- Latest stable WordPress on PHP 8.5 (official image), MariaDB, WP-CLI, Xdebug, Redis extension
+- Latest stable WordPress on PHP 8.5 (official image), MariaDB, WP-CLI, Xdebug, Redis extension, optional persistent object cache (Valkey)
 - Traefik on port 80 with host names: `wp-dev.localhost`, `mailpit.localhost`, `traefik.localhost`
 - Mailpit catches all mail sent by WordPress
 - Tools container with PHP 8.5 CLI, Composer, Node and Strauss
@@ -76,10 +76,11 @@ docker compose run --rm --no-deps -e WP_BASE_URL="$WP_RELEASE_URL" -e E2E_BROWSE
 | Service | Purpose |
 |---|---|
 | `traefik` | Reverse proxy on host port 80; routes by host name (`docker/traefik/dynamic.yml`, host names from `.env`). |
-| `wordpress` | Official `wordpress:php8.5-apache` image plus Xdebug, Redis extension, WP-CLI and Mailpit's sendmail. |
+| `wordpress` | Official `wordpress:php8.5-apache` image plus Xdebug, Redis extension, the object cache drop-in of [Redis Object Cache](https://wordpress.org/plugins/redis-cache/) (pinned with checksum), WP-CLI and Mailpit's sendmail. |
 | `db` | MariaDB (LTS). Port not exposed. |
 | `tools` | PHP 8.5 CLI with `zip`, Composer, Node and [Strauss](https://github.com/BrianHenryIE/strauss) (pinned phar with checksum, for PHP namespace prefixing) (profile `tools`, used via `docker compose run`). |
 | `mail` | Mailpit; receives all mail sent by WordPress. |
+| `valkey` | Valkey as persistent object cache (profile `objectcache`, started by `scripts/setup` when `WP_OBJECT_CACHE=valkey`); nothing is persisted. |
 | `e2e` | Official Playwright image for the browser tests of the projects (profile `e2e`, used via `docker compose run`). Reads the workspace read-only and writes results to `data/e2e`. |
 | `wordpress-release`, `db-release` | Release test (profile `release`, `scripts/release-test`): same WordPress image without workspace mounts, everything on tmpfs. ZIPs are read from `data/release`. |
 
@@ -91,4 +92,5 @@ docker compose run --rm --no-deps -e WP_BASE_URL="$WP_RELEASE_URL" -e E2E_BROWSE
 - **Containers write as the host user** (`HOST_UID`/`HOST_GID`), so `data/`, `vendor/` and `node_modules/` stay owned by the host user.
 - **Loopback requests work.** WordPress calls itself at `WP_URL` (WP-Cron, Site Health). Inside the container `WP_HOST` maps to `127.0.0.1` (bypassing Traefik) and Apache listens on port 80, so `HTTP_PORT` must be 80; `scripts/setup` fails if loopback requests do not work.
 - **Xdebug** is installed but only active when `XDEBUG_MODE` in `.env` is not `off`.
+- **Persistent object cache** only with `WP_OBJECT_CACHE=valkey` in `.env`: `scripts/setup` then starts `valkey` (profile `objectcache`) and the entrypoint copies the drop-in to `wp-content/object-cache.php`. Run `scripts/setup` after changing the variable; it recreates the containers and prints the object cache type. Without a reachable Valkey the drop-in stops WordPress with an error instead of falling back silently. For a plain `docker compose up`, add `--profile objectcache`.
 - **Browser tests reach WordPress through Traefik.** Traefik carries `WP_HOST` as network alias, so tools in the `e2e` container (Node) resolve `WP_URL`. Browsers resolve `*.localhost` to the loopback address themselves; projects pass `E2E_BROWSER_HOST_RULES` to Chromium (`--host-resolver-rules`). `PLAYWRIGHT_VERSION` must match the `@playwright/test` version of the projects.

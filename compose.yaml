@@ -58,6 +58,10 @@ services:
     depends_on:
       db:
         condition: service_healthy
+      # Only with the profile objectcache (scripts/setup enables it when WP_OBJECT_CACHE is set).
+      valkey:
+        condition: service_healthy
+        required: false
     # Loopback requests (WP-Cron, Site Health) to WP_URL stay inside the container.
     extra_hosts:
       - "${WP_HOST:?}:127.0.0.1"
@@ -74,7 +78,11 @@ services:
         define('WP_DEBUG_LOG', '/dev/stderr');
         define('AUTOMATIC_UPDATER_DISABLED', true);
         define('WP_AUTO_UPDATE_CORE', false);
+        define('WP_REDIS_HOST', 'valkey');
       XDEBUG_MODE: ${XDEBUG_MODE:?}
+      # Persistent object cache: empty (none) or valkey (drop-in installed by the entrypoint).
+      WP_OBJECT_CACHE: ${WP_OBJECT_CACHE?}
+      WP_REDIS_HOST: valkey
       # Projects in the workspace that the entrypoint links into wp-content.
       WP_THEMES: ${WP_THEMES?}
       WP_PLUGINS: ${WP_PLUGINS?}
@@ -153,6 +161,17 @@ services:
 
   mail:
     image: axllent/mailpit:latest
+
+  # Persistent object cache (profile objectcache) for WP_OBJECT_CACHE=valkey; nothing is persisted.
+  valkey:
+    image: valkey/valkey:9.1-alpine
+    profiles: [objectcache]
+    command: ["valkey-server", "--save", "", "--appendonly", "no"]
+    healthcheck:
+      test: ["CMD", "valkey-cli", "ping"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
 
   # Browser tests of the projects (Playwright), e.g.
   # docker compose run --rm e2e npm --prefix /workspace/<project> run test:e2e
