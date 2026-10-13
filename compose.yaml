@@ -145,6 +145,8 @@ services:
       # No workspace projects: the release ZIP is installed instead.
       WP_THEMES: ""
       WP_PLUGINS: ""
+      # No persistent object cache: the release test runs against plain WordPress.
+      WP_OBJECT_CACHE: ""
     tmpfs:
       - /var/www/html:mode=0755
     volumes:
