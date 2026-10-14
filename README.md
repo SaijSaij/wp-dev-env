@@ -78,7 +78,7 @@ docker compose run --rm --no-deps -e WP_BASE_URL="$WP_RELEASE_URL" -e E2E_BROWSE
 | `traefik` | Reverse proxy on host port 80; routes by host name (`docker/traefik/dynamic.yml`, host names from `.env`). |
 | `wordpress` | Official `wordpress:php8.5-apache` image plus Xdebug, Redis extension, the object cache drop-in of [Redis Object Cache](https://wordpress.org/plugins/redis-cache/) (pinned with checksum), WP-CLI and Mailpit's sendmail. |
 | `db` | MariaDB (LTS). Port not exposed. |
-| `tools` | PHP 8.5 CLI with `zip`, Composer, Node and [Strauss](https://github.com/BrianHenryIE/strauss) (pinned phar with checksum, for PHP namespace prefixing) (profile `tools`, used via `docker compose run`). |
+| `tools` | PHP 8.5 CLI with `zip`, GD and Imagick (JPEG, PNG, WebP, AVIF, as in WordPress), Composer, Node and [Strauss](https://github.com/BrianHenryIE/strauss) (pinned phar with checksum, for PHP namespace prefixing) (profile `tools`, used via `docker compose run`). |
 | `mail` | Mailpit; receives all mail sent by WordPress. |
 | `valkey` | Valkey as persistent object cache (profile `objectcache`, started by `scripts/setup` when `WP_OBJECT_CACHE=valkey`); nothing is persisted. |
 | `e2e` | Official Playwright image for the browser tests of the projects (profile `e2e`, used via `docker compose run`). Reads the workspace read-only and writes results to `data/e2e`. |

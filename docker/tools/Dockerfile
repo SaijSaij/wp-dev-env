@@ -1,11 +1,19 @@
-# Build tools: PHP 8.5 CLI (with zip), Composer, Node and Strauss (PHP namespace prefixing).
+# Build tools: PHP 8.5 CLI (with zip, GD and Imagick), Composer, Node and Strauss (PHP namespace prefixing).
 FROM php:8.5-cli
 
+# GD and Imagick with JPEG, PNG, WebP and AVIF, like the official WordPress image: build tools
+# that process images (e.g. image variants of a theme's assets) find the same formats as WordPress.
 RUN set -eux; \
     apt-get update; \
-    apt-get install -y --no-install-recommends git unzip libzip-dev; \
-    docker-php-ext-install zip; \
-    rm -rf /var/lib/apt/lists/*
+    apt-get install -y --no-install-recommends git unzip libzip-dev \
+        libavif-dev libfreetype6-dev libjpeg-dev libpng-dev libwebp-dev libmagickwand-dev; \
+    docker-php-ext-configure gd --with-avif --with-freetype --with-jpeg --with-webp; \
+    docker-php-ext-install zip gd; \
+    pecl install imagick < /dev/null; \
+    docker-php-ext-enable imagick; \
+    rm -rf /var/lib/apt/lists/* /tmp/pear; \
+    php -r 'exit(function_exists("imageavif") && function_exists("imagewebp") ? 0 : 1);'; \
+    php -r 'exit(count(array_intersect(["AVIF", "WEBP", "JPEG", "PNG"], Imagick::queryFormats())) === 4 ? 0 : 1);'
 
 COPY --from=composer:2 /usr/bin/composer /usr/local/bin/composer
 
