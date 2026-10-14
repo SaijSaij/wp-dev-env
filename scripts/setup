@@ -68,7 +68,7 @@ for project in "${themes[@]}" "${plugins[@]}"; do
 done
 
 # Created up front so they belong to the host user, not to the Docker daemon (root).
-mkdir -p data/db data/uploads data/e2e
+mkdir -p data/db data/uploads
 
 docker compose build
 

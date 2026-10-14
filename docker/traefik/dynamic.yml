@@ -6,10 +6,6 @@ http:
       rule: 'Host(`{{ env "WP_HOST" }}`)'
       entryPoints: [web]
       service: wordpress
-    wordpress-release:
-      rule: 'Host(`{{ env "WP_RELEASE_HOST" }}`)'
-      entryPoints: [web]
-      service: wordpress-release
     mailpit:
       rule: 'Host(`{{ env "MAILPIT_HOST" }}`)'
       entryPoints: [web]
@@ -24,11 +20,6 @@ http:
       loadBalancer:
         servers:
           - url: http://wordpress:80
-    # Only running with profile release (scripts/release-test); otherwise Traefik answers 502.
-    wordpress-release:
-      loadBalancer:
-        servers:
-          - url: http://wordpress-release:80
     mailpit:
       loadBalancer:
         servers:

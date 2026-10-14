@@ -2,11 +2,12 @@
 
 Docker development environment for WordPress themes and plugins. Only Docker is required on the host.
 
+It is for developing: the site and its data persist. Tests, release tests and benchmarks belong in a test environment with fresh WordPress instances, such as [wp-test-env](https://github.com/saijsaij/wp-test-env), so they never change the development site.
+
 - Latest stable WordPress on PHP 8.5 (official image), MariaDB, WP-CLI, Xdebug, Redis extension, optional persistent object cache (Valkey)
 - Traefik on port 80 with host names: `wp-dev.localhost`, `mailpit.localhost`, `traefik.localhost`
 - Mailpit catches all mail sent by WordPress
 - Tools container with PHP 8.5 CLI, Composer, Node and Strauss
-- Release test: a theme ZIP and plugin ZIPs in a fresh, plain WordPress at `wp-release.localhost`
 
 ## Workspace
 
@@ -41,7 +42,6 @@ All services are reached through Traefik on host port 80 (must be free); `*.loca
 | `http://wp-dev.localhost` | WordPress (`WP_URL`); admin credentials come from `.env` |
 | `http://mailpit.localhost` | Mailpit web UI |
 | `http://traefik.localhost` | Traefik dashboard |
-| `http://wp-release.localhost` | Release test (`WP_RELEASE_URL`), while running |
 
 Common commands:
 
@@ -50,26 +50,8 @@ docker compose exec -u www-data wordpress wp <command>                       # W
 docker compose run --rm tools composer <command> --working-dir=/workspace/<project>
 docker compose run --rm tools npm --prefix /workspace/<project> <command>
 docker compose run --rm tools npm --prefix /workspace/<project> run start   # watch: rebuild scripts on change
-docker compose run --rm e2e npm --prefix /workspace/<project> run test:e2e    # browser tests (profile e2e)
 docker compose build --pull && docker compose up -d                          # update to the latest stable WordPress image
 ```
-
-### Release test
-
-```sh
-scripts/release-test --theme <path/to/theme.zip> [--child-theme <path/to/child.zip>] [--plugin <path/to/plugin.zip>]...
-docker compose --profile release rm --stop --force wordpress-release db-release   # stop
-```
-
-Starts a fresh WordPress (profile `release`: no workspace mounts, database and WordPress on tmpfs, nothing persisted), installs and activates the theme ZIP – or, with `--child-theme`, installs it as parent and activates the child theme ZIP on top of it (the script checks that the child names that parent) – and every plugin ZIP with WP-CLI, removes the write permissions of their directories (the script checks that writing as `www-data` fails) and checks the front page. It runs next to the development site. Browser tests run against it with the `e2e` service and overridden variables:
-
-```sh
-set -a; . ./.env; set +a
-docker compose run --rm --no-deps -e WP_BASE_URL="$WP_RELEASE_URL" -e E2E_BROWSER_HOST_RULES="MAP $WP_RELEASE_HOST traefik" \
-    -e E2E_TARGET=release -e E2E_OUTPUT_DIR=/results/release e2e npm --prefix /workspace/<project> run test:e2e
-```
-
-`E2E_TARGET` (`dev` by default) tells the tests which site they run against.
 
 ## Services
 
@@ -81,8 +63,6 @@ docker compose run --rm --no-deps -e WP_BASE_URL="$WP_RELEASE_URL" -e E2E_BROWSE
 | `tools` | PHP 8.5 CLI with `zip`, GD and Imagick (GD writes JPEG, PNG, WebP and AVIF, Imagick all but AVIF), Composer, Node and [Strauss](https://github.com/BrianHenryIE/strauss) (pinned phar with checksum, for PHP namespace prefixing) (profile `tools`, used via `docker compose run`). |
 | `mail` | Mailpit; receives all mail sent by WordPress. |
 | `valkey` | Valkey as persistent object cache (profile `objectcache`, started by `scripts/setup` when `WP_OBJECT_CACHE=valkey`); nothing is persisted. |
-| `e2e` | Official Playwright image for the browser tests of the projects (profile `e2e`, used via `docker compose run`). Reads the workspace read-only and writes results to `data/e2e`. |
-| `wordpress-release`, `db-release` | Release test (profile `release`, `scripts/release-test`): same WordPress image without workspace mounts, everything on tmpfs. ZIPs are read from `data/release`. |
 
 ## Rules
 
@@ -93,4 +73,3 @@ docker compose run --rm --no-deps -e WP_BASE_URL="$WP_RELEASE_URL" -e E2E_BROWSE
 - **Loopback requests work.** WordPress calls itself at `WP_URL` (WP-Cron, Site Health). Inside the container `WP_HOST` maps to `127.0.0.1` (bypassing Traefik) and Apache listens on port 80, so `HTTP_PORT` must be 80; `scripts/setup` fails if loopback requests do not work.
 - **Xdebug** is installed but only active when `XDEBUG_MODE` in `.env` is not `off`.
 - **Persistent object cache** only with `WP_OBJECT_CACHE=valkey` in `.env`: `scripts/setup` then starts `valkey` (profile `objectcache`) and the entrypoint copies the drop-in to `wp-content/object-cache.php`. Run `scripts/setup` after changing the variable; it recreates the containers and prints the object cache type. Without a reachable Valkey the drop-in stops WordPress with an error instead of falling back silently. For a plain `docker compose up`, add `--profile objectcache`.
-- **Browser tests reach WordPress through Traefik.** Traefik carries `WP_HOST` as network alias, so tools in the `e2e` container (Node) resolve `WP_URL`. Browsers resolve `*.localhost` to the loopback address themselves; projects pass `E2E_BROWSER_HOST_RULES` to Chromium (`--host-resolver-rules`). `PLAYWRIGHT_VERSION` must match the `@playwright/test` version of the projects.
