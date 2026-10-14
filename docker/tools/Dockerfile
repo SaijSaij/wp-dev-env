@@ -1,8 +1,9 @@
 # Build tools: PHP 8.5 CLI (with zip, GD and Imagick), Composer, Node and Strauss (PHP namespace prefixing).
 FROM php:8.5-cli
 
-# GD and Imagick with JPEG, PNG, WebP and AVIF, like the official WordPress image: build tools
-# that process images (e.g. image variants of a theme's assets) find the same formats as WordPress.
+# GD and Imagick, like the official WordPress image, for build tools that process images (e.g. image
+# variants of a theme's assets): GD writes JPEG, PNG, WebP and AVIF; Imagick writes JPEG, PNG and WebP
+# (it reads AVIF, but Debian's libheif has no AVIF encoder).
 RUN set -eux; \
     apt-get update; \
     apt-get install -y --no-install-recommends git unzip libzip-dev \
@@ -12,8 +13,9 @@ RUN set -eux; \
     pecl install imagick < /dev/null; \
     docker-php-ext-enable imagick; \
     rm -rf /var/lib/apt/lists/* /tmp/pear; \
-    php -r 'exit(function_exists("imageavif") && function_exists("imagewebp") ? 0 : 1);'; \
-    php -r 'exit(count(array_intersect(["AVIF", "WEBP", "JPEG", "PNG"], Imagick::queryFormats())) === 4 ? 0 : 1);'
+    php -r '$i = imagecreatetruecolor(1, 1); exit(imageavif($i, "/tmp/p.avif") && imagewebp($i, "/tmp/p.webp") ? 0 : 1);'; \
+    php -r 'foreach (["webp", "jpeg", "png"] as $f) { $i = new Imagick(); $i->newImage(1, 1, "white"); $i->setImageFormat($f); $i->getImageBlob(); }'; \
+    rm -f /tmp/p.avif /tmp/p.webp
 
 COPY --from=composer:2 /usr/bin/composer /usr/local/bin/composer
 
