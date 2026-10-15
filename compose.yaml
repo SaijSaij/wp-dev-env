@@ -73,6 +73,7 @@ services:
         define('AUTOMATIC_UPDATER_DISABLED', true);
         define('WP_AUTO_UPDATE_CORE', false);
         define('WP_REDIS_HOST', 'valkey');
+        define('DISABLE_WP_CRON', (bool) ${WP_DISABLE_CRON:?});
       XDEBUG_MODE: ${XDEBUG_MODE:?}
       # Persistent object cache: empty (none) or valkey (drop-in installed by the entrypoint).
       WP_OBJECT_CACHE: ${WP_OBJECT_CACHE?}

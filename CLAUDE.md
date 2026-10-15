@@ -25,7 +25,7 @@ Run from this directory.
 ```sh
 scripts/setup <site>                                                   # idempotent: switch to the site, build, install, start, configure
 scripts/reset <site>                                                   # delete the site's database and uploads, run setup again
-scripts/import <site> <dump> [--uploads <dir|archive>]                 # replace the site's database (and uploads) with a dump
+scripts/import <site> <dump> [--uploads <dir|archive>] [--keep-cron]   # replace the site's database (and uploads) with a dump; WP-Cron off unless --keep-cron
 docker compose exec -u www-data wordpress wp <command>                 # WP-CLI
 docker compose run --rm tools composer <command> --working-dir=/workspace/<project>
 docker compose run --rm tools npm --prefix /workspace/<project> <command>

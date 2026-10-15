@@ -20,7 +20,8 @@ if [[ ! -f "sites/${site}.env" ]]; then
 fi
 
 if [[ -f .env && "$(sed -n 's/^WP_SITE=//p' .env)" == "${site}" ]]; then
-    docker compose --profile '*' down --remove-orphans
+    # Only for the interpolation of compose.yaml: an .env of an older version may lack it.
+    WP_DISABLE_CRON=0 docker compose --profile '*' down --remove-orphans
 fi
 rm -rf -- "data/sites/${site}"
 

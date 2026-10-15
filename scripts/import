@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Imports a database dump (e.g. of the live site) into a site: activates the site,
-# checks the dump, replaces the database, replaces the live URL by the local one,
+# Imports a database dump (e.g. of the live site) into a site: checks the dump,
+# disables WP-Cron unless --keep-cron is given, activates the site, replaces the database, replaces the live URL by the local one,
 # sets up the local administrator, activates the configured theme and plugins and
 # optionally replaces the uploads.
 set -euo pipefail
@@ -8,19 +8,33 @@ cd "$(dirname "${BASH_SOURCE[0]}")/.."
 root="$(pwd)"
 
 usage() {
-    echo "Usage: scripts/import <site> <dump.sql|dump.sql.gz> [--uploads <directory|archive.tar.gz|archive.tgz|archive.zip>]" >&2
+    echo "Usage: scripts/import <site> <dump.sql|dump.sql.gz> [--uploads <directory|archive.tar.gz|archive.tgz|archive.zip>] [--keep-cron]" >&2
     exit 1
 }
-if (( $# != 2 && $# != 4 )); then
+if (( $# < 2 )); then
     usage
 fi
 site="$1"
 dump="$2"
+shift 2
 uploads=""
-if (( $# == 4 )); then
-    [[ "$3" == --uploads ]] || usage
-    uploads="$4"
-fi
+keep_cron=0
+while (( $# > 0 )); do
+    case "$1" in
+        --uploads)
+            (( $# >= 2 )) || usage
+            uploads="$2"
+            shift 2
+            ;;
+        --keep-cron)
+            keep_cron=1
+            shift
+            ;;
+        *)
+            usage
+            ;;
+    esac
+done
 
 if [[ ! "${site}" =~ ^[a-z][a-z0-9-]*$ ]]; then
     echo "ERROR: invalid site name '${site}'; expected lowercase letters, digits and hyphens, starting with a letter." >&2
@@ -86,28 +100,30 @@ if [[ -n "${uploads}" ]]; then
     check_outside_repositories "${uploads}"
 fi
 
+# Load the configuration of the site for the checks below. The values are exported, so
+# Docker Compose uses them instead of the generated .env (which may belong to another site).
+set -a
 # shellcheck source=/dev/null
-live_url="$(set -a && source "sites/${site}.env" && echo "${WP_LIVE_URL:-}")"
-if [[ -z "${live_url}" ]]; then
+source config.env
+# shellcheck source=/dev/null
+source "sites/${site}.env"
+set +a
+export WP_SITE="${site}" WP_HOST="${site}.localhost"
+export WP_URL="http://${WP_HOST}" WP_DISABLE_CRON=0
+if [[ -z "${WP_LIVE_URL:-}" ]]; then
     echo "ERROR: WP_LIVE_URL in sites/${site}.env is empty; set it to the URL of the site the dump comes from (e.g. https://example.com)." >&2
     exit 1
 fi
+if [[ -z "${WP_TABLE_PREFIX:-}" ]]; then
+    echo "ERROR: WP_TABLE_PREFIX in sites/${site}.env is empty or missing." >&2
+    exit 1
+fi
+live_url="${WP_LIVE_URL}"
 
-# Activate the site (stops another one, checks the site file); its database is changed only below.
-scripts/setup "${site}"
-
-set -a
-# shellcheck source=/dev/null
-source .env
-set +a
-
-wp() {
-    docker compose exec -T -u www-data wordpress wp "$@"
-}
-
-echo
+# The dump is checked before anything changes, in the tools container (gzip and grep;
+# the host needs nothing but Docker).
 echo "Checking ${dump}"
-statements="$(docker compose exec -T db sh -c "${decompress} | grep -oE '^(CREATE TABLE( IF NOT EXISTS)? \`[^\`]+\`|USE |CREATE DATABASE)' || true" < "${dump}")"
+statements="$(docker compose run --rm --no-deps -T --entrypoint sh tools -c "${decompress} | grep -oE '^(CREATE TABLE( IF NOT EXISTS)? \`[^\`]+\`|USE |CREATE DATABASE)' || true" < "${dump}")"
 if grep -qE '^(USE |CREATE DATABASE)' <<< "${statements}"; then
     echo "ERROR: ${dump} selects or creates a database (USE / CREATE DATABASE); export it without --databases / --all-databases." >&2
     exit 1
@@ -124,6 +140,30 @@ if grep -qxF "${WP_TABLE_PREFIX}blogs" <<< "${tables}"; then
     echo "ERROR: ${dump} is a multisite database (table ${WP_TABLE_PREFIX}blogs); multisite is not supported." >&2
     exit 1
 fi
+
+# Scheduled events of live data may call external services: WP-Cron stays off for the
+# imported data unless --keep-cron is given. scripts/setup turns the marker into
+# DISABLE_WP_CRON; scripts/reset removes it with the data of the site.
+mkdir -p "data/sites/${site}"
+if (( keep_cron )); then
+    rm -f "data/sites/${site}/cron-disabled"
+    cron_result="enabled (--keep-cron)"
+else
+    touch "data/sites/${site}/cron-disabled"
+    cron_result="disabled (run single events with wp cron event run <hook>)"
+fi
+
+# Activate the site (stops another one, checks the site file); its database is changed only below.
+scripts/setup "${site}"
+
+set -a
+# shellcheck source=/dev/null
+source .env
+set +a
+
+wp() {
+    docker compose exec -T -u www-data wordpress wp "$@"
+}
 
 echo "Replacing the database of site '${site}'"
 docker compose exec -T -e MYSQL_PWD="${DB_PASSWORD}" db \
@@ -204,3 +244,4 @@ echo "Replacements:   ${replaced} (${live_url} -> ${WP_URL})"
 echo "Administrator:  ${WP_ADMIN_USER} ${admin}"
 echo "Active theme:   $(wp theme list --status=active --field=name)"
 echo "Uploads:        ${uploads_result}"
+echo "WP-Cron:        ${cron_result}"
