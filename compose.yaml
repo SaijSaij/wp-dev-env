@@ -63,6 +63,7 @@ services:
       WORDPRESS_DB_NAME: ${DB_NAME:?}
       WORDPRESS_DB_USER: ${DB_USER:?}
       WORDPRESS_DB_PASSWORD: ${DB_PASSWORD:?}
+      WORDPRESS_TABLE_PREFIX: ${WP_TABLE_PREFIX:?}
       WORDPRESS_DEBUG: "1"
       WORDPRESS_CONFIG_EXTRA: |
         define('WP_HOME', '${WP_URL:?}');
@@ -76,6 +77,8 @@ services:
       # Persistent object cache: empty (none) or valkey (drop-in installed by the entrypoint).
       WP_OBJECT_CACHE: ${WP_OBJECT_CACHE?}
       WP_REDIS_HOST: valkey
+      # Live site of imported data (may be empty); the entrypoint redirects missing uploads there.
+      WP_LIVE_URL: ${WP_LIVE_URL?}
       # Projects (paths relative to the workspace) that the entrypoint links into wp-content.
       WP_THEMES: ${WP_THEMES?}
       WP_PLUGINS: ${WP_PLUGINS?}

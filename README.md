@@ -33,7 +33,7 @@ A site is one WordPress installation for one project: its own database and uploa
 | File | Content |
 |---|---|
 | `config.env` | settings shared by all sites: workspace, ports, host names of Mailpit and Traefik, host user, database credentials, administrator, Xdebug (template: `config.env.example`) |
-| `sites/<site>.env` | the projects of one site: `WP_THEMES`, `WP_PLUGINS`, `WP_ACTIVE_THEME`, `WP_PACKAGE_LINKS`, `WP_TITLE`, `WP_OBJECT_CACHE` (template: `sites/example.env.example`) |
+| `sites/<site>.env` | the projects of one site: `WP_THEMES`, `WP_PLUGINS`, `WP_ACTIVE_THEME`, `WP_PACKAGE_LINKS`, `WP_TITLE`, `WP_OBJECT_CACHE`, `WP_TABLE_PREFIX`, `WP_LIVE_URL` (template: `sites/example.env.example`) |
 
 `scripts/setup <site>` stops the previously active site (its data stays), writes `.env` from both files plus `WP_SITE`, `WP_HOST` and `WP_URL`, and sets the site up. Docker Compose reads the generated `.env`, so plain `docker compose` commands act on the active site. Every variable is required in its file; a missing, unknown or duplicate variable stops the setup with an error. A site needs no theme of its own: leave `WP_THEMES` empty and set `WP_ACTIVE_THEME` to a theme that ships with WordPress, such as `twentytwentyfive`.
 
@@ -44,6 +44,7 @@ cp config.env.example config.env                  # adjust host UID/GID if neede
 cp sites/example.env.example sites/my-site.env    # set the projects of the site
 scripts/setup my-site     # idempotent: stop the other site, build, composer install, start, install WordPress, activate theme and plugins
 scripts/reset my-site     # stop the site if it is active, delete its database and uploads, run setup again
+scripts/import my-site data/dumps/live.sql.gz [--uploads data/dumps/uploads.tar.gz]   # replace the site's data with a dump
 ```
 
 `scripts/setup` runs `composer install` in every project of the site that has a `composer.json`, then `npm ci` and `npm run build` (if the project defines it) in every project that has a `package.json` (a `package-lock.json` is required).
@@ -66,6 +67,20 @@ docker compose run --rm tools npm --prefix /workspace/<project> run start   # wa
 docker compose build --pull && docker compose up -d                          # update to the latest stable WordPress image
 ```
 
+## Importing live data
+
+`scripts/import <site> <dump.sql|dump.sql.gz> [--uploads <directory|archive.tar.gz|archive.tgz|archive.zip>]` replaces the database of a site with a dump, e.g. of the live site (a plain `mysqldump`/`mariadb-dump` of one database; dumps of MySQL 8 import as well):
+
+1. It refuses dumps and uploads inside a Git work tree, except below `data/` (ignored here): live data contains personal data and must never end up in a repository. Keep them in `data/dumps/`.
+2. It runs `scripts/setup <site>`, then checks the dump: it must contain `<WP_TABLE_PREFIX>options`, must not select or create a database (`USE`, `CREATE DATABASE`) and must not be a multisite database. Only then the database is replaced.
+3. `wp search-replace` replaces `WP_LIVE_URL` (with `https://` and `http://`, also JSON-escaped as in block attributes) by the local URL in all tables with the prefix; GUIDs stay unchanged.
+4. The administrator from `config.env` gets its password and the role administrator, or is created. The theme and plugins of the site file are activated; rewrite rules and the object cache are flushed. Permalinks of the imported data stay (`scripts/setup` sets them only on a fresh installation).
+5. With `--uploads`, the uploads of the site are replaced by the directory or archive (its content is the content of `wp-content/uploads`; a single top-level directory `uploads` is entered). Without it, the uploads stay unchanged.
+
+Whenever `WP_LIVE_URL` is set, requests for files below `/wp-content/uploads/` that do not exist locally redirect (302) to the same path on the live site, so a site works without copying all uploads.
+
+Mail goes to Mailpit, but WP-Cron runs the scheduled events of the imported data, which may call external services.
+
 ## Services
 
 | Service | Purpose |
@@ -84,6 +99,7 @@ docker compose build --pull && docker compose up -d                          # u
 - **The workspace is read-only in `wordpress`.** Project code cannot write into its own directory; only `tools` can write to the workspace.
 - **Containers write as the host user** (`HOST_UID`/`HOST_GID`), so `data/`, `vendor/` and `node_modules/` stay owned by the host user.
 - **Loopback requests work.** WordPress calls itself at `WP_URL` (WP-Cron, Site Health). Inside the container `WP_HOST` maps to `127.0.0.1` (bypassing Traefik) and Apache listens on port 80, so `HTTP_PORT` must be 80; `scripts/setup` fails if loopback requests do not work.
+- **Live data stays local.** Dumps and uploads of live sites belong in `data/` (never committed); `scripts/import` refuses them inside any other Git work tree.
 - **One site at a time.** All sites share the Compose project `wp-dev-env`; `scripts/setup <site>` stops the active one first.
 - **Xdebug** is installed but only active when `XDEBUG_MODE` in `config.env` is not `off`.
 - **Persistent object cache** only with `WP_OBJECT_CACHE=valkey` in the site file: `scripts/setup` then starts `valkey` (profile `objectcache`) and the entrypoint copies the drop-in to `wp-content/object-cache.php`. Run `scripts/setup` after changing the variable; it recreates the containers and prints the object cache type. Without a reachable Valkey the drop-in stops WordPress with an error instead of falling back silently. For a plain `docker compose up`, add `--profile objectcache`.

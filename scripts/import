@@ -1,0 +1,206 @@
+#!/usr/bin/env bash
+# Imports a database dump (e.g. of the live site) into a site: activates the site,
+# checks the dump, replaces the database, replaces the live URL by the local one,
+# sets up the local administrator, activates the configured theme and plugins and
+# optionally replaces the uploads.
+set -euo pipefail
+cd "$(dirname "${BASH_SOURCE[0]}")/.."
+root="$(pwd)"
+
+usage() {
+    echo "Usage: scripts/import <site> <dump.sql|dump.sql.gz> [--uploads <directory|archive.tar.gz|archive.tgz|archive.zip>]" >&2
+    exit 1
+}
+if (( $# != 2 && $# != 4 )); then
+    usage
+fi
+site="$1"
+dump="$2"
+uploads=""
+if (( $# == 4 )); then
+    [[ "$3" == --uploads ]] || usage
+    uploads="$4"
+fi
+
+if [[ ! "${site}" =~ ^[a-z][a-z0-9-]*$ ]]; then
+    echo "ERROR: invalid site name '${site}'; expected lowercase letters, digits and hyphens, starting with a letter." >&2
+    exit 1
+fi
+if [[ ! -f "sites/${site}.env" ]]; then
+    echo "ERROR: ${root}/sites/${site}.env not found." >&2
+    exit 1
+fi
+
+if [[ ! -f "${dump}" || ! -r "${dump}" ]]; then
+    echo "ERROR: dump '${dump}' not found or not readable." >&2
+    exit 1
+fi
+case "${dump}" in
+    *.sql.gz) decompress="gzip -dc" ;;
+    *.sql) decompress="cat" ;;
+    *)
+        echo "ERROR: dump '${dump}' must end in .sql or .sql.gz." >&2
+        exit 1
+        ;;
+esac
+dump="$(realpath "${dump}")"
+
+uploads_kind=""
+if [[ -n "${uploads}" ]]; then
+    if [[ -d "${uploads}" ]]; then
+        uploads_kind=directory
+    elif [[ -f "${uploads}" ]]; then
+        case "${uploads}" in
+            *.tar.gz | *.tgz) uploads_kind=tar ;;
+            *.zip) uploads_kind=zip ;;
+            *)
+                echo "ERROR: uploads '${uploads}' must be a directory or end in .tar.gz, .tgz or .zip." >&2
+                exit 1
+                ;;
+        esac
+    else
+        echo "ERROR: uploads '${uploads}' not found." >&2
+        exit 1
+    fi
+    uploads="$(realpath "${uploads}")"
+fi
+
+# Live data contains personal data and must never end up in a repository: it lives
+# below data/ (ignored by this repository) or outside every Git work tree.
+check_outside_repositories() {
+    local path="$1" directory
+    if [[ "${path}" == "${root}/data/"* ]]; then
+        return
+    fi
+    directory="$(dirname "${path}")"
+    while [[ "${directory}" != / ]]; do
+        if [[ -e "${directory}/.git" ]]; then
+            echo "ERROR: '${path}' lies in the Git work tree ${directory}. Move it to ${root}/data/dumps/ or outside every repository." >&2
+            exit 1
+        fi
+        directory="$(dirname "${directory}")"
+    done
+}
+check_outside_repositories "${dump}"
+if [[ -n "${uploads}" ]]; then
+    check_outside_repositories "${uploads}"
+fi
+
+# shellcheck source=/dev/null
+live_url="$(set -a && source "sites/${site}.env" && echo "${WP_LIVE_URL:-}")"
+if [[ -z "${live_url}" ]]; then
+    echo "ERROR: WP_LIVE_URL in sites/${site}.env is empty; set it to the URL of the site the dump comes from (e.g. https://example.com)." >&2
+    exit 1
+fi
+
+# Activate the site (stops another one, checks the site file); its database is changed only below.
+scripts/setup "${site}"
+
+set -a
+# shellcheck source=/dev/null
+source .env
+set +a
+
+wp() {
+    docker compose exec -T -u www-data wordpress wp "$@"
+}
+
+echo
+echo "Checking ${dump}"
+statements="$(docker compose exec -T db sh -c "${decompress} | grep -oE '^(CREATE TABLE( IF NOT EXISTS)? \`[^\`]+\`|USE |CREATE DATABASE)' || true" < "${dump}")"
+if grep -qE '^(USE |CREATE DATABASE)' <<< "${statements}"; then
+    echo "ERROR: ${dump} selects or creates a database (USE / CREATE DATABASE); export it without --databases / --all-databases." >&2
+    exit 1
+fi
+# The backticks are part of the SQL, not a command substitution.
+# shellcheck disable=SC2016
+tables="$(sed -nE 's/^CREATE TABLE( IF NOT EXISTS)? `([^`]+)`$/\2/p' <<< "${statements}")"
+if ! grep -qxF "${WP_TABLE_PREFIX}options" <<< "${tables}"; then
+    found="$(sed -n 's/options$//p' <<< "${tables}" | paste -sd ' ' -)"
+    echo "ERROR: ${dump} has no table ${WP_TABLE_PREFIX}options for WP_TABLE_PREFIX=${WP_TABLE_PREFIX} in sites/${site}.env (prefixes found: ${found:-none})." >&2
+    exit 1
+fi
+if grep -qxF "${WP_TABLE_PREFIX}blogs" <<< "${tables}"; then
+    echo "ERROR: ${dump} is a multisite database (table ${WP_TABLE_PREFIX}blogs); multisite is not supported." >&2
+    exit 1
+fi
+
+echo "Replacing the database of site '${site}'"
+docker compose exec -T -e MYSQL_PWD="${DB_PASSWORD}" db \
+    mariadb --user="${DB_USER}" --execute="DROP DATABASE \`${DB_NAME}\`; CREATE DATABASE \`${DB_NAME}\`"
+docker compose exec -T -e MYSQL_PWD="${DB_PASSWORD}" db \
+    sh -c "${decompress} | mariadb --user='${DB_USER}' '${DB_NAME}'" < "${dump}"
+
+# Live plugins and themes may be missing here; they must not stop WP-CLI.
+wp_core() {
+    wp --skip-plugins --skip-themes "$@"
+}
+
+# URLs in content, options and meta, also JSON-escaped (block attributes); GUIDs stay.
+live_rest="${live_url#*://}"
+replaced=0
+replace() {
+    local count
+    count="$(wp_core search-replace "$1" "$2" --all-tables-with-prefix --skip-columns=guid --format=count)"
+    echo "search-replace: ${count} × $1"
+    replaced=$(( replaced + count ))
+}
+replace "https://${live_rest}" "${WP_URL}"
+replace "http://${live_rest}" "${WP_URL}"
+replace "https:\\/\\/${live_rest//\//\\/}" "${WP_URL//\//\\/}"
+replace "http:\\/\\/${live_rest//\//\\/}" "${WP_URL//\//\\/}"
+
+if wp_core user get "${WP_ADMIN_USER}" --field=ID > /dev/null 2>&1; then
+    wp_core user update "${WP_ADMIN_USER}" --user_pass="${WP_ADMIN_PASSWORD}" --role=administrator --skip-email
+    admin="updated (password and role administrator)"
+else
+    wp_core user create "${WP_ADMIN_USER}" "${WP_ADMIN_EMAIL}" --user_pass="${WP_ADMIN_PASSWORD}" --role=administrator
+    admin="created"
+fi
+
+wp theme activate "${WP_ACTIVE_THEME}"
+IFS=',' read -r -a plugins <<< "${WP_PLUGINS}"
+plugin_slugs=()
+for project in "${plugins[@]}"; do
+    plugin_slugs+=("$(basename "${project}")")
+done
+if (( ${#plugin_slugs[@]} > 0 )); then
+    wp plugin activate "${plugin_slugs[@]}"
+fi
+wp rewrite flush
+wp cache flush
+
+uploads_result="unchanged (missing files redirect to ${live_url})"
+if [[ -n "${uploads}" ]]; then
+    echo "Replacing the uploads of site '${site}' with ${uploads}"
+    # In the tools container, so the host needs nothing but Docker.
+    # shellcheck disable=SC2016
+    count="$(docker compose run --rm --no-deps -T \
+        -e KIND="${uploads_kind}" \
+        -v "${root}/data/sites/${site}/uploads:/target" \
+        -v "${uploads}:/source:ro" \
+        --entrypoint sh tools -c '
+            set -eu
+            case "${KIND}" in
+                directory) source=/source ;;
+                tar) source="$(mktemp -d)"; tar -xzf /source -C "${source}" ;;
+                zip) source="$(mktemp -d)"; unzip -q /source -d "${source}" ;;
+            esac
+            # A single top-level directory named uploads holds the content.
+            if [ "$(ls -A "${source}")" = uploads ] && [ -d "${source}/uploads" ]; then
+                source="${source}/uploads"
+            fi
+            find /target -mindepth 1 -delete
+            cp -R "${source}/." /target/
+            find /target -type f | wc -l
+        ')"
+    uploads_result="replaced (${count} files; missing files redirect to ${live_url})"
+fi
+
+echo
+echo "Imported into site '${site}' (${WP_URL})"
+echo "Tables:         $(wc -l <<< "${tables}") from $(basename "${dump}")"
+echo "Replacements:   ${replaced} (${live_url} -> ${WP_URL})"
+echo "Administrator:  ${WP_ADMIN_USER} ${admin}"
+echo "Active theme:   $(wp theme list --status=active --field=name)"
+echo "Uploads:        ${uploads_result}"
