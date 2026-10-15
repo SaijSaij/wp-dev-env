@@ -40,9 +40,17 @@ RUN set -eux; \
 COPY --from=wordpress:cli-php8.5 /usr/local/bin/wp /usr/local/bin/wp
 COPY --from=axllent/mailpit:latest /mailpit /usr/local/bin/mailpit
 
+# Document root from APACHE_DOCUMENT_ROOT at runtime (/var/www/html, or web/ of a Bedrock
+# site repository), as the documentation of the official PHP image suggests.
+ENV APACHE_DOCUMENT_ROOT=/var/www/html
+RUN set -eux; \
+    sed -ri -e 's!/var/www/html!${APACHE_DOCUMENT_ROOT}!g' /etc/apache2/sites-available/*.conf; \
+    grep -q 'APACHE_DOCUMENT_ROOT' /etc/apache2/sites-available/000-default.conf
+
 COPY docker-entrypoint-dev.sh /usr/local/bin/docker-entrypoint-dev.sh
 ENTRYPOINT ["docker-entrypoint-dev.sh"]
 CMD ["apache2-foreground"]
 
+# WP_CORE_PATH: where the core lies below the document root (empty, or /wp for Bedrock).
 HEALTHCHECK --interval=2s --timeout=5s --start-period=60s --retries=30 \
-    CMD curl -fsS -o /dev/null http://localhost/readme.html || exit 1
+    CMD curl -fsS -o /dev/null "http://localhost${WP_CORE_PATH:-}/readme.html" || exit 1

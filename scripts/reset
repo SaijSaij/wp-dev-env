@@ -4,24 +4,22 @@
 # Other sites keep their data.
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
+# shellcheck source=lib/site.sh
+source lib/site.sh
 
 if (( $# != 1 )); then
     echo "Usage: scripts/reset <site>" >&2
     exit 1
 fi
 site="$1"
-if [[ ! "${site}" =~ ^[a-z][a-z0-9-]*$ ]]; then
-    echo "ERROR: invalid site name '${site}'; expected lowercase letters, digits and hyphens, starting with a letter." >&2
-    exit 1
-fi
+check_site_name "${site}"
 if [[ ! -f "sites/${site}.env" ]]; then
     echo "ERROR: $(pwd)/sites/${site}.env not found." >&2
     exit 1
 fi
 
 if [[ -f .env && "$(sed -n 's/^WP_SITE=//p' .env)" == "${site}" ]]; then
-    # Only for the interpolation of compose.yaml: an .env of an older version may lack it.
-    WP_DISABLE_CRON=0 docker compose --profile '*' down --remove-orphans
+    stop_containers
 fi
 rm -rf -- "data/sites/${site}"
 

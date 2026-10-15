@@ -6,6 +6,8 @@
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 root="$(pwd)"
+# shellcheck source=lib/site.sh
+source lib/site.sh
 
 usage() {
     echo "Usage: scripts/import <site> <dump.sql|dump.sql.gz> [--uploads <directory|archive.tar.gz|archive.tgz|archive.zip>] [--keep-cron]" >&2
@@ -36,10 +38,7 @@ while (( $# > 0 )); do
     esac
 done
 
-if [[ ! "${site}" =~ ^[a-z][a-z0-9-]*$ ]]; then
-    echo "ERROR: invalid site name '${site}'; expected lowercase letters, digits and hyphens, starting with a letter." >&2
-    exit 1
-fi
+check_site_name "${site}"
 if [[ ! -f "sites/${site}.env" ]]; then
     echo "ERROR: ${root}/sites/${site}.env not found." >&2
     exit 1
@@ -102,14 +101,7 @@ fi
 
 # Load the configuration of the site for the checks below. The values are exported, so
 # Docker Compose uses them instead of the generated .env (which may belong to another site).
-set -a
-# shellcheck source=/dev/null
-source config.env
-# shellcheck source=/dev/null
-source "sites/${site}.env"
-set +a
-export WP_SITE="${site}" WP_HOST="${site}.localhost"
-export WP_URL="http://${WP_HOST}" WP_DISABLE_CRON=0
+load_site "${site}"
 if [[ -z "${WP_LIVE_URL:-}" ]]; then
     echo "ERROR: WP_LIVE_URL in sites/${site}.env is empty; set it to the URL of the site the dump comes from (e.g. https://example.com)." >&2
     exit 1

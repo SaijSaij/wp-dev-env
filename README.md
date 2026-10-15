@@ -28,14 +28,23 @@ The workspace is mounted as `/workspace` (read-only in the `wordpress` container
 
 ## Sites
 
-A site is one WordPress installation for one project: its own database and uploads in `data/sites/<site>/`, its own projects, and its own host name `http://<site>.localhost` (so cookies and browser storage of different projects never mix). Configuration comes from two files, both local and never committed:
+A site is one WordPress installation for one project: its own database, uploads, caches and authentication keys in `data/sites/<site>/`, its own projects, and its own host name `http://<site>.localhost` (so cookies and browser storage of different projects never mix). Configuration comes from two files, both local and never committed:
 
 | File | Content |
 |---|---|
 | `config.env` | settings shared by all sites: workspace, ports, host names of Mailpit and Traefik, host user, database credentials, administrator, Xdebug (template: `config.env.example`) |
-| `sites/<site>.env` | the projects of one site: `WP_THEMES`, `WP_PLUGINS`, `WP_ACTIVE_THEME`, `WP_PACKAGE_LINKS`, `WP_TITLE`, `WP_OBJECT_CACHE`, `WP_TABLE_PREFIX`, `WP_LIVE_URL` (template: `sites/example.env.example`) |
+| `sites/<site>.env` | one site: `WP_SITE_TYPE`, `WP_SITE_ROOT`, `WP_THEMES`, `WP_PLUGINS`, `WP_ACTIVE_THEME`, `WP_PACKAGE_LINKS`, `WP_TITLE`, `WP_OBJECT_CACHE`, `WP_TABLE_PREFIX`, `WP_LIVE_URL` (template: `sites/example.env.example`) |
 
-`scripts/setup <site>` stops the previously active site (its data stays), writes `.env` from both files plus `WP_SITE`, `WP_HOST` and `WP_URL`, and sets the site up. Docker Compose reads the generated `.env`, so plain `docker compose` commands act on the active site. Every variable is required in its file; a missing, unknown or duplicate variable stops the setup with an error. A site needs no theme of its own: leave `WP_THEMES` empty and set `WP_ACTIVE_THEME` to a theme that ships with WordPress, such as `twentytwentyfive`.
+`scripts/setup <site>` checks both files, stops the previously active site (its data stays), writes `.env` from both files, the derived paths and URLs (`lib/site.sh`) and the site's keys and salts (`data/sites/<site>/salts.env`, generated once, so logins survive restarts), and sets the site up. Docker Compose reads the generated `.env`, so plain `docker compose` commands act on the active site. Every variable is required in its file; a missing, unknown or duplicate variable stops the setup with an error. A site needs no theme of its own: leave `WP_THEMES` empty and set `WP_ACTIVE_THEME` to a theme that ships with WordPress, such as `twentytwentyfive`.
+
+### Site types
+
+- **`vanilla`** runs the WordPress of the image: the core is copied to a tmpfs in `/var/www/html` on every start, the official entrypoint writes `wp-config.php`, and the projects of the site are linked into `wp-content`. `WP_SITE_ROOT` stays empty.
+- **`bedrock`** runs a [Bedrock](https://roots.io/bedrock/) site repository (`WP_SITE_ROOT`, a path relative to the workspace) with its own core (`web/wp`), plugins and configuration from Composer. Apache serves `web/`; Bedrock reads its configuration (database, `WP_HOME`, `WP_SITEURL=<url>/wp`, `WP_ENV=development`, keys and salts) from the container's environment; WP-CLI runs in the repository and finds `wp-cli.yml` there. `scripts/setup` runs `composer install` in the repository before the projects.
+  - Projects at `<root>/web/app/themes/<slug>` and `<root>/web/app/plugins/<slug>` belong to the repository (embedded, e.g. a theme built only for this site). They get `composer install`, package links and their build like every project, and run in development mode.
+  - All other projects come from the workspace (e.g. a plugin you develop for several sites, or a test project): `scripts/setup` links them into `web/app/themes|plugins` of the repository, replacing a release Composer installed there. The repository must ignore these paths (`git check-ignore`; Bedrock ignores `web/app/plugins/*` already, themes need an entry in its `.gitignore`); otherwise the setup stops before it changes anything.
+  - Uploads and caches are mounted at `web/app/uploads` and `web/app/cache` (the setup creates `web/app/cache`; Bedrock ignores it). The repository stays read-only in the container: WordPress cannot write `web/.htaccess`, so Apache sends every missing file to `index.php` itself, and plugins are installed with Composer, not in the admin. `WP_OBJECT_CACHE` must stay empty; require an object cache drop-in with Composer instead.
+  - For a deployment, build every embedded theme and plugin with `composer release` in its directory and deploy its release instead of the source: the release command works in a subdirectory of the site repository.
 
 ## Usage
 
@@ -88,7 +97,7 @@ Mail always goes to Mailpit.
 | Service | Purpose |
 |---|---|
 | `traefik` | Reverse proxy on host port 80; routes by host name (`docker/traefik/dynamic.yml`, host names from `.env`). |
-| `wordpress` | Official `wordpress:php8.5-apache` image plus Xdebug, Redis extension, the object cache drop-in of [Redis Object Cache](https://wordpress.org/plugins/redis-cache/) (pinned with checksum), WP-CLI and Mailpit's sendmail. |
+| `wordpress` | Official `wordpress:php8.5-apache` image plus Xdebug, Redis extension, the object cache drop-in of [Redis Object Cache](https://wordpress.org/plugins/redis-cache/) (pinned with checksum), WP-CLI and Mailpit's sendmail; the document root comes from `APACHE_DOCUMENT_ROOT` (`/var/www/html`, or `web/` of a Bedrock site). |
 | `db` | MariaDB (LTS). Port not exposed. |
 | `tools` | PHP 8.5 CLI with `zip`, GD and Imagick (GD writes JPEG, PNG, WebP and AVIF, Imagick all but AVIF), Composer, Node and [Strauss](https://github.com/BrianHenryIE/strauss) (pinned phar with checksum, for PHP namespace prefixing) (profile `tools`, used via `docker compose run`). |
 | `mail` | Mailpit; receives all mail sent by WordPress. |
@@ -96,8 +105,8 @@ Mail always goes to Mailpit.
 
 ## Rules
 
-- **WordPress core is never persisted.** `/var/www/html` is a tmpfs, so every container start copies the core fresh from the image. Only the database and uploads of each site (`data/sites/<site>/db`, `data/sites/<site>/uploads`) persist.
-- **Always the latest stable WordPress**, never beta: the image uses the floating `php8.5-apache` tag. Update with `docker compose build --pull`. Automatic core updates are disabled.
+- **WordPress core is never persisted** in a vanilla site: `/var/www/html` is a tmpfs, so every container start copies the core fresh from the image. A Bedrock site uses the core its repository requires. Only the data of each site (`data/sites/<site>/`: database, uploads, caches, keys and salts) persist.
+- **Always the latest stable WordPress** in vanilla sites, never beta: the image uses the floating `php8.5-apache` tag. Update with `docker compose build --pull`. Automatic core updates are disabled.
 - **The workspace is read-only in `wordpress`.** Project code cannot write into its own directory; only `tools` can write to the workspace.
 - **Containers write as the host user** (`HOST_UID`/`HOST_GID`), so `data/`, `vendor/` and `node_modules/` stay owned by the host user.
 - **Loopback requests work.** WordPress calls itself at `WP_URL` (WP-Cron, Site Health). Inside the container `WP_HOST` maps to `127.0.0.1` (bypassing Traefik) and Apache listens on port 80, so `HTTP_PORT` must be 80; `scripts/setup` fails if loopback requests do not work.

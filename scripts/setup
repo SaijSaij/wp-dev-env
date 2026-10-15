@@ -1,16 +1,13 @@
 #!/usr/bin/env bash
-# Idempotent setup of a site: generates .env from config.env and sites/<site>.env,
-# stops the previously active site, builds images, installs Composer and npm
-# dependencies of the linked projects and builds their scripts, starts the
-# containers, installs WordPress and activates the configured theme and plugins.
+# Idempotent setup of a site: checks config.env and sites/<site>.env, stops the
+# previously active site, generates .env, builds images, installs Composer and npm
+# dependencies (for a Bedrock site also of the site repository) and builds the
+# projects' scripts, links the projects, starts the containers, installs WordPress
+# and activates the configured theme and plugins.
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
-
-# Variables of config.env (shared by all sites) and of a site file; all are required.
-config_keys=(WORKSPACE_DIR HTTP_PORT MAILPIT_HOST TRAEFIK_HOST HOST_UID HOST_GID
-    DB_NAME DB_USER DB_PASSWORD WP_ADMIN_USER WP_ADMIN_PASSWORD WP_ADMIN_EMAIL XDEBUG_MODE)
-site_keys=(WP_THEMES WP_PLUGINS WP_ACTIVE_THEME WP_PACKAGE_LINKS WP_TITLE WP_OBJECT_CACHE
-    WP_TABLE_PREFIX WP_LIVE_URL)
+# shellcheck source=lib/site.sh
+source lib/site.sh
 
 available_sites() {
     local file names=()
@@ -29,10 +26,7 @@ if (( $# != 1 )); then
     exit 1
 fi
 site="$1"
-if [[ ! "${site}" =~ ^[a-z][a-z0-9-]*$ ]]; then
-    echo "ERROR: invalid site name '${site}'; expected lowercase letters, digits and hyphens, starting with a letter." >&2
-    exit 1
-fi
+check_site_name "${site}"
 if [[ ! -f config.env ]]; then
     echo "ERROR: $(pwd)/config.env not found. Copy config.env.example to config.env and adjust it." >&2
     exit 1
@@ -74,16 +68,11 @@ check_keys() {
         fi
     done
 }
-check_keys config.env "${config_keys[@]}"
-check_keys "sites/${site}.env" "${site_keys[@]}"
+check_keys config.env "${CONFIG_KEYS[@]}"
+check_keys "sites/${site}.env" "${SITE_KEYS[@]}"
 
-# Load both files for the checks below; nothing is changed before they pass.
-set -a
-# shellcheck source=/dev/null
-source config.env
-# shellcheck source=/dev/null
-source "sites/${site}.env"
-set +a
+# Load both files and derive the rest for the checks below; nothing is changed before they pass.
+load_site "${site}"
 
 if [[ ! -d "${WORKSPACE_DIR}" ]]; then
     echo "ERROR: WORKSPACE_DIR '${WORKSPACE_DIR}' (config.env) not found (relative to $(pwd))." >&2
@@ -142,72 +131,155 @@ if [[ -n "${WP_LIVE_URL}" && ! "${WP_LIVE_URL}" =~ ^https?://[A-Za-z0-9.-]+(:[0-
     echo "ERROR: WP_LIVE_URL '${WP_LIVE_URL}' in sites/${site}.env must be empty or an http(s) URL without a trailing slash, query or fragment (e.g. https://example.com)." >&2
     exit 1
 fi
+case "${WP_OBJECT_CACHE}" in
+    '' | valkey) ;;
+    *)
+        echo "ERROR: WP_OBJECT_CACHE '${WP_OBJECT_CACHE}' in sites/${site}.env must be empty or 'valkey'." >&2
+        exit 1
+        ;;
+esac
+
+# Bedrock: the projects at web/app/<themes|plugins>/<slug> of the site repository belong
+# to it (embedded); all others come from the workspace and are linked there.
+external_themes=()
+external_plugins=()
+if [[ "${WP_SITE_TYPE}" == vanilla ]]; then
+    if [[ -n "${WP_SITE_ROOT}" ]]; then
+        echo "ERROR: WP_SITE_ROOT in sites/${site}.env must be empty for WP_SITE_TYPE=vanilla." >&2
+        exit 1
+    fi
+else
+    if [[ -z "${WP_SITE_ROOT}" ]]; then
+        echo "ERROR: WP_SITE_ROOT in sites/${site}.env must name the Bedrock repository (a path relative to the workspace) for WP_SITE_TYPE=bedrock." >&2
+        exit 1
+    fi
+    check_path WP_SITE_ROOT "${WP_SITE_ROOT}"
+    for file in composer.json config/application.php web/wp-config.php; do
+        if [[ ! -f "${workspace}/${WP_SITE_ROOT}/${file}" ]]; then
+            echo "ERROR: ${WP_SITE_ROOT} (WP_SITE_ROOT in sites/${site}.env) is no Bedrock repository: ${file} is missing." >&2
+            exit 1
+        fi
+    done
+    if [[ -n "${WP_OBJECT_CACHE}" ]]; then
+        echo "ERROR: WP_OBJECT_CACHE in sites/${site}.env must be empty for a Bedrock site; the drop-in would have to go into the read-only site repository (require one with Composer instead)." >&2
+        exit 1
+    fi
+    # classify <themes|plugins> <path>...
+    classify() {
+        local kind="$1" path
+        shift
+        for path in "$@"; do
+            if [[ "${path}" == "${WP_SITE_ROOT}/web/app/${kind}/$(basename "${path}")" ]]; then
+                continue
+            elif [[ "${path}" == "${WP_SITE_ROOT}/"* ]]; then
+                echo "ERROR: '${path}' lies in the site repository but not at ${WP_SITE_ROOT}/web/app/${kind}/<slug>." >&2
+                exit 1
+            elif [[ "${kind}" == themes ]]; then
+                external_themes+=("${path}")
+            else
+                external_plugins+=("${path}")
+            fi
+        done
+    }
+    classify themes "${themes[@]}"
+    classify plugins "${plugins[@]}"
+fi
+
+# Links into the site repository must be ignored by it, so they never get committed
+# (checked with Git in the tools container; the exported variables serve Compose).
+if [[ "${WP_SITE_TYPE}" == bedrock ]]; then
+    if (( ${#external_themes[@]} + ${#external_plugins[@]} > 0 )); then
+        link_paths=()
+        for path in "${external_themes[@]}"; do
+            link_paths+=("web/app/themes/$(basename "${path}")")
+        done
+        for path in "${external_plugins[@]}"; do
+            link_paths+=("web/app/plugins/$(basename "${path}")")
+        done
+        # shellcheck disable=SC2016 # expanded by the shell in the container
+        not_ignored="$(docker compose run --rm --no-deps -T --entrypoint sh tools -c '
+            cd "$1" || exit 1
+            shift
+            git rev-parse --is-inside-work-tree > /dev/null 2>&1 || { echo "(no Git repository)"; exit 0; }
+            for path in "$@"; do
+                git check-ignore -q "${path}" || echo "${path}"
+            done' sh "/workspace/${WP_SITE_ROOT}" "${link_paths[@]}")"
+        if [[ -n "${not_ignored}" ]]; then
+            echo "ERROR: ${WP_SITE_ROOT} must ignore the links to workspace projects (add them to its .gitignore):" $'\n'"${not_ignored}" >&2
+            exit 1
+        fi
+    fi
+fi
 
 # Stop the previously active site; its data stays in data/sites/<site>.
 if [[ -f .env ]]; then
     previous="$(sed -n 's/^WP_SITE=//p' .env)"
     if [[ "${previous}" != "${site}" ]]; then
         echo "Stopping site '${previous:-unknown}'"
-        # Only for the interpolation of compose.yaml: an .env of an older version may lack them.
-        WP_SITE="${previous:-unknown}" WP_DISABLE_CRON=0 docker compose --profile '*' down --remove-orphans
+        stop_containers
     fi
 fi
 
 # Docker Compose reads .env; it is generated, so plain docker compose commands act on the active site.
-WP_HOST="${site}.localhost"
-WP_URL="http://${WP_HOST}"
-# scripts/import marks imported data whose WP-Cron stays off (DISABLE_WP_CRON).
-if [[ -f "data/sites/${site}/cron-disabled" ]]; then
-    WP_DISABLE_CRON=1
-else
-    WP_DISABLE_CRON=0
-fi
 {
     echo "# Generated by scripts/setup from config.env and sites/${site}.env. Do not edit."
-    echo "WP_SITE=${site}"
-    echo "WP_HOST=${WP_HOST}"
-    echo "WP_URL=${WP_URL}"
-    echo "WP_DISABLE_CRON=${WP_DISABLE_CRON}"
+    for key in "${DERIVED_KEYS[@]}"; do
+        echo "${key}=${!key}"
+    done
     echo
     echo "# config.env"
     cat config.env
     echo
     echo "# sites/${site}.env"
     cat "sites/${site}.env"
+    echo
+    echo "# data/sites/${site}/salts.env"
+    cat "data/sites/${site}/salts.env"
 } > .env.tmp
 mv .env.tmp .env
+
+# replace_with_link <target> <path in the workspace> <description>: replaces whatever is
+# at target (a link, or a package Composer installed) by a relative symlink.
+replace_with_link() {
+    local target="$1" directory="$2" description="$3" relative
+    relative="$(realpath -m --relative-to="$(dirname "${target}")" "${workspace}/${directory}")"
+    if [[ -L "${target}" && "$(readlink "${target}")" == "${relative}" ]]; then
+        echo "${description}"
+        return
+    fi
+    if [[ -L "${target}" ]]; then
+        rm "${target}"
+    elif [[ -e "${target}" ]]; then
+        rm -r -- "${target}"
+    fi
+    ln -s "${relative}" "${target}"
+    echo "${description}"
+}
 
 # Replaces a Composer package of a project by a relative symlink to its checkout in the
 # workspace, so changes take effect immediately. Lock file and composer.json stay untouched;
 # Composer removes only the link when it installs another version of the package.
 link_packages() {
-    local project="$1" link package directory target relative
+    local project="$1" link target
     for link in "${package_links[@]}"; do
-        package="${link%%=*}"
-        directory="${link#*=}"
-        target="${workspace}/${project}/vendor/${package}"
-        if [[ ! -e "${target}" && ! -L "${target}" ]]; then
-            continue
+        target="${workspace}/${project}/vendor/${link%%=*}"
+        if [[ -e "${target}" || -L "${target}" ]]; then
+            replace_with_link "${target}" "${link#*=}" "package link: ${project} uses ${link%%=*} from ${link#*=}"
         fi
-        relative="$(realpath -m --relative-to="$(dirname "${target}")" "${workspace}/${directory}")"
-        if [[ -L "${target}" && "$(readlink "${target}")" == "${relative}" ]]; then
-            echo "package link: ${project} uses ${package} from ${directory}"
-            continue
-        fi
-        if [[ -L "${target}" ]]; then
-            rm "${target}"
-        else
-            rm -r -- "${target}"
-        fi
-        ln -s "${relative}" "${target}"
-        echo "package link: ${project} uses ${package} from ${directory}"
     done
 }
 
 # Created up front so they belong to the host user, not to the Docker daemon (root).
-mkdir -p "data/sites/${site}/db" "data/sites/${site}/uploads"
+mkdir -p "data/sites/${site}/db" "data/sites/${site}/uploads" "data/sites/${site}/cache"
 
 docker compose build
+
+if [[ "${WP_SITE_TYPE}" == bedrock ]]; then
+    echo "composer install: ${WP_SITE_ROOT} (site repository)"
+    docker compose run --rm tools composer install --working-dir="/workspace/${WP_SITE_ROOT}" --no-interaction
+    # Mount point of data/sites/<site>/cache; Bedrock ignores web/app/cache.
+    mkdir -p "${workspace}/${WP_SITE_ROOT}/web/app/cache"
+fi
 
 for project in "${themes[@]}" "${plugins[@]}"; do
     if [[ -f "${workspace}/${project}/composer.json" ]]; then
@@ -228,31 +300,35 @@ for project in "${themes[@]}" "${plugins[@]}"; do
     fi
 done
 
+if [[ "${WP_SITE_TYPE}" == bedrock ]]; then
+    for path in "${external_themes[@]}"; do
+        replace_with_link "${workspace}/${WP_SITE_ROOT}/web/app/themes/$(basename "${path}")" "${path}" "site link: themes/$(basename "${path}") -> ${path}"
+    done
+    for path in "${external_plugins[@]}"; do
+        replace_with_link "${workspace}/${WP_SITE_ROOT}/web/app/plugins/$(basename "${path}")" "${path}" "site link: plugins/$(basename "${path}") -> ${path}"
+    done
+fi
+
 # The profile objectcache is enabled only with WP_OBJECT_CACHE=valkey; otherwise Compose
 # would also start valkey as an (optional) dependency of wordpress.
 services=(traefik db wordpress mail)
 profile=()
-case "${WP_OBJECT_CACHE}" in
-    '')
-        docker compose --profile objectcache rm --stop --force valkey
-        ;;
-    valkey)
-        profile=(--profile objectcache)
-        services+=(valkey)
-        ;;
-    *)
-        echo "ERROR: WP_OBJECT_CACHE '${WP_OBJECT_CACHE}' in sites/${site}.env must be empty or 'valkey'." >&2
-        exit 1
-        ;;
-esac
+if [[ "${WP_OBJECT_CACHE}" == valkey ]]; then
+    profile=(--profile objectcache)
+    services+=(valkey)
+else
+    docker compose --profile objectcache rm --stop --force valkey
+fi
 # A changed WP_OBJECT_CACHE recreates wordpress; its entrypoint installs or omits the drop-in.
 docker compose "${profile[@]}" up -d --wait "${services[@]}"
 
-if ! docker compose exec -T wordpress curl -fsS -o /dev/null "${WP_URL}/readme.html"; then
+if ! docker compose exec -T wordpress curl -fsS -o /dev/null "${WP_SITEURL}/readme.html"; then
     echo "ERROR: ${WP_URL} is not reachable from inside the wordpress container, so WP-Cron and other loopback requests fail. HTTP_PORT in config.env must be 80." >&2
     exit 1
 fi
 
+# WP-CLI runs in the working directory of the container (WP_WORKDIR); a Bedrock site
+# repository brings its wp-cli.yml there.
 wp() {
     docker compose exec -T -u www-data wordpress wp "$@"
 }
@@ -281,7 +357,7 @@ if (( ${#plugin_slugs[@]} > 0 )); then
 fi
 
 echo
-echo "Site:           ${site}"
+echo "Site:           ${site} (${WP_SITE_TYPE}${WP_SITE_ROOT:+, ${WP_SITE_ROOT}})"
 echo "WordPress $(wp core version) running at ${WP_URL}"
 echo "Active theme:   $(wp theme list --status=active --field=name)"
 echo "Active plugins: $(wp plugin list --status=active --field=name | paste -sd ' ' -)"

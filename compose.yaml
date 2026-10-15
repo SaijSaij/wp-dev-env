@@ -55,15 +55,32 @@ services:
       valkey:
         condition: service_healthy
         required: false
+    # WP-CLI finds the installation here (a Bedrock site repository brings its wp-cli.yml).
+    working_dir: ${WP_WORKDIR:?}
     # Loopback requests (WP-Cron, Site Health) to WP_URL stay inside the container.
     extra_hosts:
       - "${WP_HOST:?}:127.0.0.1"
     environment:
+      # Site type (scripts/setup derives the paths): vanilla runs the image's core in
+      # /var/www/html, bedrock the site repository with its own core and configuration.
+      WP_SITE_TYPE: ${WP_SITE_TYPE:?}
+      APACHE_DOCUMENT_ROOT: ${WP_DOCROOT:?}
+      WP_CORE_PATH: ${WP_CORE_PATH?}
+      WP_UPLOADS_DIR: ${WP_UPLOADS_DIR:?}
+      # Configuration of the official image (vanilla).
       WORDPRESS_DB_HOST: db
       WORDPRESS_DB_NAME: ${DB_NAME:?}
       WORDPRESS_DB_USER: ${DB_USER:?}
       WORDPRESS_DB_PASSWORD: ${DB_PASSWORD:?}
       WORDPRESS_TABLE_PREFIX: ${WP_TABLE_PREFIX:?}
+      WORDPRESS_AUTH_KEY: ${AUTH_KEY:?}
+      WORDPRESS_SECURE_AUTH_KEY: ${SECURE_AUTH_KEY:?}
+      WORDPRESS_LOGGED_IN_KEY: ${LOGGED_IN_KEY:?}
+      WORDPRESS_NONCE_KEY: ${NONCE_KEY:?}
+      WORDPRESS_AUTH_SALT: ${AUTH_SALT:?}
+      WORDPRESS_SECURE_AUTH_SALT: ${SECURE_AUTH_SALT:?}
+      WORDPRESS_LOGGED_IN_SALT: ${LOGGED_IN_SALT:?}
+      WORDPRESS_NONCE_SALT: ${NONCE_SALT:?}
       WORDPRESS_DEBUG: "1"
       WORDPRESS_CONFIG_EXTRA: |
         define('WP_HOME', '${WP_URL:?}');
@@ -74,13 +91,33 @@ services:
         define('WP_AUTO_UPDATE_CORE', false);
         define('WP_REDIS_HOST', 'valkey');
         define('DISABLE_WP_CRON', (bool) ${WP_DISABLE_CRON:?});
+      # Configuration of Bedrock (config/application.php reads environment variables).
+      DB_HOST: db
+      DB_NAME: ${DB_NAME:?}
+      DB_USER: ${DB_USER:?}
+      DB_PASSWORD: ${DB_PASSWORD:?}
+      DB_PREFIX: ${WP_TABLE_PREFIX:?}
+      WP_ENV: development
+      WP_ENVIRONMENT_TYPE: local
+      WP_HOME: ${WP_URL:?}
+      WP_SITEURL: ${WP_SITEURL:?}
+      WP_DEBUG_LOG: /dev/stderr
+      DISABLE_WP_CRON: ${WP_DISABLE_CRON:?}
+      AUTH_KEY: ${AUTH_KEY:?}
+      SECURE_AUTH_KEY: ${SECURE_AUTH_KEY:?}
+      LOGGED_IN_KEY: ${LOGGED_IN_KEY:?}
+      NONCE_KEY: ${NONCE_KEY:?}
+      AUTH_SALT: ${AUTH_SALT:?}
+      SECURE_AUTH_SALT: ${SECURE_AUTH_SALT:?}
+      LOGGED_IN_SALT: ${LOGGED_IN_SALT:?}
+      NONCE_SALT: ${NONCE_SALT:?}
       XDEBUG_MODE: ${XDEBUG_MODE:?}
       # Persistent object cache: empty (none) or valkey (drop-in installed by the entrypoint).
       WP_OBJECT_CACHE: ${WP_OBJECT_CACHE?}
       WP_REDIS_HOST: valkey
       # Live site of imported data (may be empty); the entrypoint redirects missing uploads there.
       WP_LIVE_URL: ${WP_LIVE_URL?}
-      # Projects (paths relative to the workspace) that the entrypoint links into wp-content.
+      # Projects (paths relative to the workspace) that the entrypoint links into wp-content (vanilla).
       WP_THEMES: ${WP_THEMES?}
       WP_PLUGINS: ${WP_PLUGINS?}
     # The WordPress core is never persisted: the image declares VOLUME /var/www/html,
@@ -91,7 +128,10 @@ services:
     volumes:
       # The workspace is read-only here; write attempts by project code fail immediately.
       - ${WORKSPACE_DIR:?}:/workspace:ro
-      - ./data/sites/${WP_SITE:?}/uploads:/var/www/html/wp-content/uploads
+      # Mounted inside the workspace for a Bedrock site (web/app/uploads, web/app/cache);
+      # scripts/setup creates the mount points.
+      - ./data/sites/${WP_SITE:?}/uploads:${WP_UPLOADS_DIR:?}
+      - ./data/sites/${WP_SITE:?}/cache:${WP_CACHE_DIR:?}
 
   tools:
     build: docker/tools
