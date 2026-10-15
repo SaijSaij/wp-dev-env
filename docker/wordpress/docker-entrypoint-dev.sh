@@ -7,28 +7,36 @@ set -eu
 
 wp_content=/var/www/html/wp-content
 
-# link_projects <themes|plugins> <comma-separated directory names>
+# link_projects <themes|plugins> <comma-separated paths relative to the workspace>
+# Each project is linked under its last path segment (its slug).
 link_projects() {
     kind="$1"
-    names="$2"
+    paths="$2"
+    variable="WP_$(echo "${kind}" | tr '[:lower:]' '[:upper:]')"
 
     mkdir -p "${wp_content}/${kind}"
     chown www-data:www-data "${wp_content}/${kind}"
 
-    for name in $(echo "${names}" | tr ',' ' '); do
-        case "${name}" in
-            */* | . | ..)
-                echo "ERROR: invalid project name '${name}' in WP_$(echo "${kind}" | tr '[:lower:]' '[:upper:]'); expected a directory name in the workspace." >&2
+    for path in $(echo "${paths}" | tr ',' ' '); do
+        case "/${path}/" in
+            //* | */./* | */../*)
+                echo "ERROR: invalid project path '${path}' in ${variable}; expected a path relative to the workspace, without '.' or '..'." >&2
                 exit 1
                 ;;
         esac
-        if [ ! -d "/workspace/${name}" ]; then
-            echo "ERROR: /workspace/${name} not found. Check WP_$(echo "${kind}" | tr '[:lower:]' '[:upper:]') and WORKSPACE_DIR in .env." >&2
+        if [ ! -d "/workspace/${path}" ]; then
+            echo "ERROR: /workspace/${path} not found. Check ${variable} in the site file and WORKSPACE_DIR in config.env." >&2
             exit 1
         fi
-        ln -sfn "/workspace/${name}" "${wp_content}/${kind}/${name}"
-        chown -h www-data:www-data "${wp_content}/${kind}/${name}"
-        echo "Linked ${kind}/${name} -> /workspace/${name}" >&2
+        slug="$(basename "${path}")"
+        # wp-content is a fresh tmpfs, so an existing link means two projects with the same slug.
+        if [ -e "${wp_content}/${kind}/${slug}" ] || [ -L "${wp_content}/${kind}/${slug}" ]; then
+            echo "ERROR: ${variable} links two projects as ${kind}/${slug}." >&2
+            exit 1
+        fi
+        ln -s "/workspace/${path}" "${wp_content}/${kind}/${slug}"
+        chown -h www-data:www-data "${wp_content}/${kind}/${slug}"
+        echo "Linked ${kind}/${slug} -> /workspace/${path}" >&2
     done
 }
 

@@ -1,2 +1,5 @@
 /.env
+/.env.tmp
+/config.env
+/sites/*.env
 /data/

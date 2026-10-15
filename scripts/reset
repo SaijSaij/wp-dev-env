@@ -1,10 +1,27 @@
 #!/usr/bin/env bash
-# Restores a defined state: stops all containers, deletes database and uploads,
-# then runs the setup again.
+# Restores a defined state of one site: stops it if it is active, deletes its
+# database and uploads (data/sites/<site>), then runs the setup again.
+# Other sites keep their data.
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
-docker compose --profile '*' down --remove-orphans
-rm -rf data/db data/uploads
+if (( $# != 1 )); then
+    echo "Usage: scripts/reset <site>" >&2
+    exit 1
+fi
+site="$1"
+if [[ ! "${site}" =~ ^[a-z][a-z0-9-]*$ ]]; then
+    echo "ERROR: invalid site name '${site}'; expected lowercase letters, digits and hyphens, starting with a letter." >&2
+    exit 1
+fi
+if [[ ! -f "sites/${site}.env" ]]; then
+    echo "ERROR: $(pwd)/sites/${site}.env not found." >&2
+    exit 1
+fi
 
-exec scripts/setup
+if [[ -f .env && "$(sed -n 's/^WP_SITE=//p' .env)" == "${site}" ]]; then
+    docker compose --profile '*' down --remove-orphans
+fi
+rm -rf -- "data/sites/${site}"
+
+exec scripts/setup "${site}"

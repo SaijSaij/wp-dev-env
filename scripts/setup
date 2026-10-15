@@ -1,53 +1,180 @@
 #!/usr/bin/env bash
-# Idempotent setup: builds images, installs Composer and npm dependencies of the
-# linked projects and builds their scripts, starts the containers, installs
-# WordPress and activates the configured theme and plugins.
+# Idempotent setup of a site: generates .env from config.env and sites/<site>.env,
+# stops the previously active site, builds images, installs Composer and npm
+# dependencies of the linked projects and builds their scripts, starts the
+# containers, installs WordPress and activates the configured theme and plugins.
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
-if [[ ! -f .env ]]; then
-    echo "ERROR: $(pwd)/.env not found. Copy .env.example to .env and adjust it." >&2
+# Variables of config.env (shared by all sites) and of a site file; all are required.
+config_keys=(WORKSPACE_DIR HTTP_PORT MAILPIT_HOST TRAEFIK_HOST HOST_UID HOST_GID
+    DB_NAME DB_USER DB_PASSWORD WP_ADMIN_USER WP_ADMIN_PASSWORD WP_ADMIN_EMAIL XDEBUG_MODE)
+site_keys=(WP_THEMES WP_PLUGINS WP_ACTIVE_THEME WP_PACKAGE_LINKS WP_TITLE WP_OBJECT_CACHE)
+
+available_sites() {
+    local file names=()
+    for file in sites/*.env; do
+        [[ -f "${file}" ]] && names+=("$(basename "${file}" .env)")
+    done
+    if (( ${#names[@]} == 0 )); then
+        echo "none (copy sites/example.env.example to sites/<site>.env)"
+    else
+        echo "${names[*]}"
+    fi
+}
+
+if (( $# != 1 )); then
+    echo "Usage: scripts/setup <site>   (sites: $(available_sites))" >&2
     exit 1
 fi
+site="$1"
+if [[ ! "${site}" =~ ^[a-z][a-z0-9-]*$ ]]; then
+    echo "ERROR: invalid site name '${site}'; expected lowercase letters, digits and hyphens, starting with a letter." >&2
+    exit 1
+fi
+if [[ ! -f config.env ]]; then
+    echo "ERROR: $(pwd)/config.env not found. Copy config.env.example to config.env and adjust it." >&2
+    exit 1
+fi
+if [[ ! -f "sites/${site}.env" ]]; then
+    echo "ERROR: $(pwd)/sites/${site}.env not found. Available sites: $(available_sites)." >&2
+    exit 1
+fi
+
+# check_keys <file> <key>...: the file assigns exactly the given variables, each once.
+check_keys() {
+    local file="$1" line key
+    shift
+    local -A allowed=() seen=()
+    for key in "$@"; do
+        allowed["${key}"]=1
+    done
+    while IFS= read -r line || [[ -n "${line}" ]]; do
+        [[ "${line}" =~ ^[[:space:]]*(#|$) ]] && continue
+        if [[ ! "${line}" =~ ^([A-Z_][A-Z0-9_]*)= ]]; then
+            echo "ERROR: ${file}: unexpected line '${line}'; expected NAME=value." >&2
+            exit 1
+        fi
+        key="${BASH_REMATCH[1]}"
+        if [[ -z "${allowed[${key}]:-}" ]]; then
+            echo "ERROR: ${file}: variable ${key} does not belong here; allowed: $*." >&2
+            exit 1
+        fi
+        if [[ -n "${seen[${key}]:-}" ]]; then
+            echo "ERROR: ${file}: variable ${key} is set twice." >&2
+            exit 1
+        fi
+        seen["${key}"]=1
+    done < "${file}"
+    for key in "$@"; do
+        if [[ -z "${seen[${key}]:-}" ]]; then
+            echo "ERROR: ${file}: variable ${key} is missing (it may be empty, but must be set)." >&2
+            exit 1
+        fi
+    done
+}
+check_keys config.env "${config_keys[@]}"
+check_keys "sites/${site}.env" "${site_keys[@]}"
+
+# Load both files for the checks below; nothing is changed before they pass.
 set -a
 # shellcheck source=/dev/null
-source .env
+source config.env
+# shellcheck source=/dev/null
+source "sites/${site}.env"
 set +a
 
 if [[ ! -d "${WORKSPACE_DIR}" ]]; then
-    echo "ERROR: WORKSPACE_DIR '${WORKSPACE_DIR}' not found (relative to $(pwd))." >&2
+    echo "ERROR: WORKSPACE_DIR '${WORKSPACE_DIR}' (config.env) not found (relative to $(pwd))." >&2
     exit 1
 fi
+workspace="$(realpath "${WORKSPACE_DIR}")"
 
 IFS=',' read -r -a themes <<< "${WP_THEMES}"
 IFS=',' read -r -a plugins <<< "${WP_PLUGINS}"
 IFS=',' read -r -a package_links <<< "${WP_PACKAGE_LINKS}"
 
+# check_path <variable> <path>: a directory in the workspace, given relative to it.
+check_path() {
+    local variable="$1" path="$2"
+    if [[ ! "${path}" =~ ^[A-Za-z0-9_.-]+(/[A-Za-z0-9_.-]+)*$ || "/${path}/" =~ /\.\.?/ ]]; then
+        echo "ERROR: ${variable} entry '${path}' in sites/${site}.env must be a path relative to the workspace, without '.' or '..'." >&2
+        exit 1
+    fi
+    if [[ ! -d "${workspace}/${path}" ]]; then
+        echo "ERROR: ${variable} entry '${path}' in sites/${site}.env not found in the workspace (${workspace}/${path})." >&2
+        exit 1
+    fi
+}
+
+# check_slugs <variable> <path>...: projects are linked under their last path segment.
+check_slugs() {
+    local variable="$1" path slug
+    shift
+    local -A slugs=()
+    for path in "$@"; do
+        check_path "${variable}" "${path}"
+        slug="$(basename "${path}")"
+        if [[ -n "${slugs[${slug}]:-}" ]]; then
+            echo "ERROR: ${variable} in sites/${site}.env lists '${slugs[${slug}]}' and '${path}'; both would be linked as '${slug}'." >&2
+            exit 1
+        fi
+        slugs["${slug}"]="${path}"
+    done
+}
+check_slugs WP_THEMES "${themes[@]}"
+check_slugs WP_PLUGINS "${plugins[@]}"
+
 for link in "${package_links[@]}"; do
-    if [[ ! "${link}" =~ ^[a-z0-9_.-]+/[a-z0-9_.-]+=[^/=]+$ ]]; then
-        echo "ERROR: WP_PACKAGE_LINKS entry '${link}' must have the form vendor/package=directory." >&2
+    if [[ ! "${link}" =~ ^[a-z0-9_.-]+/[a-z0-9_.-]+=.+$ ]]; then
+        echo "ERROR: WP_PACKAGE_LINKS entry '${link}' in sites/${site}.env must have the form vendor/package=path." >&2
         exit 1
     fi
-    if [[ ! -d "${WORKSPACE_DIR}/${link#*=}" ]]; then
-        echo "ERROR: directory '${link#*=}' of WP_PACKAGE_LINKS entry '${link}' not found in WORKSPACE_DIR." >&2
-        exit 1
-    fi
+    check_path WP_PACKAGE_LINKS "${link#*=}"
 done
+
+# Stop the previously active site; its data stays in data/sites/<site>.
+if [[ -f .env ]]; then
+    previous="$(sed -n 's/^WP_SITE=//p' .env)"
+    if [[ "${previous}" != "${site}" ]]; then
+        echo "Stopping site '${previous:-unknown}'"
+        # WP_SITE only for the interpolation of compose.yaml (an .env from before sites has none).
+        WP_SITE="${previous:-unknown}" docker compose --profile '*' down --remove-orphans
+    fi
+fi
+
+# Docker Compose reads .env; it is generated, so plain docker compose commands act on the active site.
+WP_HOST="${site}.localhost"
+WP_URL="http://${WP_HOST}"
+{
+    echo "# Generated by scripts/setup from config.env and sites/${site}.env. Do not edit."
+    echo "WP_SITE=${site}"
+    echo "WP_HOST=${WP_HOST}"
+    echo "WP_URL=${WP_URL}"
+    echo
+    echo "# config.env"
+    cat config.env
+    echo
+    echo "# sites/${site}.env"
+    cat "sites/${site}.env"
+} > .env.tmp
+mv .env.tmp .env
 
 # Replaces a Composer package of a project by a relative symlink to its checkout in the
 # workspace, so changes take effect immediately. Lock file and composer.json stay untouched;
 # Composer removes only the link when it installs another version of the package.
 link_packages() {
-    local project="$1" link package directory target
+    local project="$1" link package directory target relative
     for link in "${package_links[@]}"; do
         package="${link%%=*}"
         directory="${link#*=}"
-        target="${WORKSPACE_DIR}/${project}/vendor/${package}"
-        if [[ -L "${target}" && "$(readlink "${target}")" == "../../../${directory}" ]]; then
-            echo "package link: ${project} uses ${package} from ${directory}"
+        target="${workspace}/${project}/vendor/${package}"
+        if [[ ! -e "${target}" && ! -L "${target}" ]]; then
             continue
         fi
-        if [[ ! -e "${target}" && ! -L "${target}" ]]; then
+        relative="$(realpath -m --relative-to="$(dirname "${target}")" "${workspace}/${directory}")"
+        if [[ -L "${target}" && "$(readlink "${target}")" == "${relative}" ]]; then
+            echo "package link: ${project} uses ${package} from ${directory}"
             continue
         fi
         if [[ -L "${target}" ]]; then
@@ -55,25 +182,18 @@ link_packages() {
         else
             rm -r -- "${target}"
         fi
-        ln -s "../../../${directory}" "${target}"
+        ln -s "${relative}" "${target}"
         echo "package link: ${project} uses ${package} from ${directory}"
     done
 }
 
-for project in "${themes[@]}" "${plugins[@]}"; do
-    if [[ ! -d "${WORKSPACE_DIR}/${project}" ]]; then
-        echo "ERROR: project '${project}' not found in WORKSPACE_DIR ($(realpath -m "${WORKSPACE_DIR}/${project}"))." >&2
-        exit 1
-    fi
-done
-
 # Created up front so they belong to the host user, not to the Docker daemon (root).
-mkdir -p data/db data/uploads
+mkdir -p "data/sites/${site}/db" "data/sites/${site}/uploads"
 
 docker compose build
 
 for project in "${themes[@]}" "${plugins[@]}"; do
-    if [[ -f "${WORKSPACE_DIR}/${project}/composer.json" ]]; then
+    if [[ -f "${workspace}/${project}/composer.json" ]]; then
         echo "composer install: ${project}"
         docker compose run --rm tools composer install --working-dir="/workspace/${project}" --no-interaction
         link_packages "${project}"
@@ -81,8 +201,8 @@ for project in "${themes[@]}" "${plugins[@]}"; do
         echo "composer install: ${project} has no composer.json, nothing to install"
     fi
     # After Composer: a project's build may use files from its vendor directory.
-    if [[ -f "${WORKSPACE_DIR}/${project}/package.json" ]]; then
-        if [[ ! -f "${WORKSPACE_DIR}/${project}/package-lock.json" ]]; then
+    if [[ -f "${workspace}/${project}/package.json" ]]; then
+        if [[ ! -f "${workspace}/${project}/package-lock.json" ]]; then
             echo "ERROR: ${project} has a package.json but no package-lock.json; run npm install in the project once and commit the lock file." >&2
             exit 1
         fi
@@ -104,7 +224,7 @@ case "${WP_OBJECT_CACHE}" in
         services+=(valkey)
         ;;
     *)
-        echo "ERROR: WP_OBJECT_CACHE '${WP_OBJECT_CACHE}' in .env must be empty or 'valkey'." >&2
+        echo "ERROR: WP_OBJECT_CACHE '${WP_OBJECT_CACHE}' in sites/${site}.env must be empty or 'valkey'." >&2
         exit 1
         ;;
 esac
@@ -112,7 +232,7 @@ esac
 docker compose "${profile[@]}" up -d --wait "${services[@]}"
 
 if ! docker compose exec -T wordpress curl -fsS -o /dev/null "${WP_URL}/readme.html"; then
-    echo "ERROR: ${WP_URL} is not reachable from inside the wordpress container, so WP-Cron and other loopback requests fail. WP_URL must be http://${WP_HOST} and HTTP_PORT must be 80." >&2
+    echo "ERROR: ${WP_URL} is not reachable from inside the wordpress container, so WP-Cron and other loopback requests fail. HTTP_PORT in config.env must be 80." >&2
     exit 1
 fi
 
@@ -134,11 +254,16 @@ fi
 
 wp rewrite structure '/%postname%/'
 wp theme activate "${WP_ACTIVE_THEME}"
-if (( ${#plugins[@]} > 0 )); then
-    wp plugin activate "${plugins[@]}"
+plugin_slugs=()
+for project in "${plugins[@]}"; do
+    plugin_slugs+=("$(basename "${project}")")
+done
+if (( ${#plugin_slugs[@]} > 0 )); then
+    wp plugin activate "${plugin_slugs[@]}"
 fi
 
 echo
+echo "Site:           ${site}"
 echo "WordPress $(wp core version) running at ${WP_URL}"
 echo "Active theme:   $(wp theme list --status=active --field=name)"
 echo "Active plugins: $(wp plugin list --status=active --field=name | paste -sd ' ' -)"

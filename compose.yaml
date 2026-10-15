@@ -34,7 +34,7 @@ services:
       MARIADB_PASSWORD: ${DB_PASSWORD:?}
       MARIADB_RANDOM_ROOT_PASSWORD: "1"
     volumes:
-      - ./data/db:/var/lib/mysql
+      - ./data/sites/${WP_SITE:?}/db:/var/lib/mysql
     healthcheck:
       test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
       interval: 2s
@@ -76,7 +76,7 @@ services:
       # Persistent object cache: empty (none) or valkey (drop-in installed by the entrypoint).
       WP_OBJECT_CACHE: ${WP_OBJECT_CACHE?}
       WP_REDIS_HOST: valkey
-      # Projects in the workspace that the entrypoint links into wp-content.
+      # Projects (paths relative to the workspace) that the entrypoint links into wp-content.
       WP_THEMES: ${WP_THEMES?}
       WP_PLUGINS: ${WP_PLUGINS?}
     # The WordPress core is never persisted: the image declares VOLUME /var/www/html,
@@ -87,7 +87,7 @@ services:
     volumes:
       # The workspace is read-only here; write attempts by project code fail immediately.
       - ${WORKSPACE_DIR:?}:/workspace:ro
-      - ./data/uploads:/var/www/html/wp-content/uploads
+      - ./data/sites/${WP_SITE:?}/uploads:/var/www/html/wp-content/uploads
 
   tools:
     build: docker/tools

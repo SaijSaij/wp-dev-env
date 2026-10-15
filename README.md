@@ -2,10 +2,10 @@
 
 Docker development environment for WordPress themes and plugins. Only Docker is required on the host.
 
-It is for developing: the site and its data persist. Tests, release tests and benchmarks belong in a test environment with fresh WordPress instances, such as [wp-test-env](https://github.com/saijsaij/wp-test-env), so they never change the development site.
+It is for developing: every project gets a **site** with its own database and uploads, which persist. One site runs at a time; switching takes one command. Tests, release tests and benchmarks belong in a test environment with fresh WordPress instances, such as [wp-test-env](https://github.com/saijsaij/wp-test-env), so they never change the development site.
 
 - Latest stable WordPress on PHP 8.5 (official image), MariaDB, WP-CLI, Xdebug, Redis extension, optional persistent object cache (Valkey)
-- Traefik on port 80 with host names: `wp-dev.localhost`, `mailpit.localhost`, `traefik.localhost`
+- Traefik on port 80 with host names: `<site>.localhost`, `mailpit.localhost`, `traefik.localhost`
 - Mailpit catches all mail sent by WordPress
 - Tools container with PHP 8.5 CLI, Composer, Node and Strauss
 
@@ -17,29 +17,42 @@ wp-dev-env lives next to the projects it serves. The parent directory is the wor
 <workspace>/
 ├── wp-dev-env/        this repository
 ├── my-theme/          a theme checkout
-├── my-plugin/         a plugin checkout
-└── my-library/        e.g. a Composer path repository used by my-theme
+├── my-library/        e.g. a Composer package used by my-theme
+└── clients/
+    └── my-plugin/     projects may be nested
 ```
 
-The workspace is mounted as `/workspace` (read-only in the `wordpress` container). Themes and plugins listed in `.env` are linked into `wp-content/themes` and `wp-content/plugins`. Because the directory structure below `/workspace` matches the host, relative symlinks between checkouts (such as Composer `path` repositories) resolve on the host and in every container.
+The workspace is mounted as `/workspace` (read-only in the `wordpress` container). The themes and plugins of the active site are given as paths relative to the workspace and linked into `wp-content/themes` and `wp-content/plugins` under their last path segment (`clients/my-plugin` becomes `plugins/my-plugin`). Because the directory structure below `/workspace` matches the host, relative symlinks between checkouts resolve on the host and in every container.
 
-`WP_PACKAGE_LINKS` (e.g. `vendor/library=my-library`) replaces a Composer package that a project installed from its lock file by a relative symlink to its checkout in the workspace, so changes to the library take effect immediately. `scripts/setup` sets the links after every `composer install`; lock files and `composer.json` stay unchanged. Composer removes only the link (never the checkout) when it installs another version of the package.
+`WP_PACKAGE_LINKS` (e.g. `vendor/library=my-library`) replaces a Composer package that a project installed from its lock file by a relative symlink to its checkout in the workspace, so changes to the library take effect immediately. `scripts/setup` sets the links in every project of the site after `composer install`; lock files and `composer.json` stay unchanged. Composer removes only the link (never the checkout) when it installs another version of the package.
+
+## Sites
+
+A site is one WordPress installation for one project: its own database and uploads in `data/sites/<site>/`, its own projects, and its own host name `http://<site>.localhost` (so cookies and browser storage of different projects never mix). Configuration comes from two files, both local and never committed:
+
+| File | Content |
+|---|---|
+| `config.env` | settings shared by all sites: workspace, ports, host names of Mailpit and Traefik, host user, database credentials, administrator, Xdebug (template: `config.env.example`) |
+| `sites/<site>.env` | the projects of one site: `WP_THEMES`, `WP_PLUGINS`, `WP_ACTIVE_THEME`, `WP_PACKAGE_LINKS`, `WP_TITLE`, `WP_OBJECT_CACHE` (template: `sites/example.env.example`) |
+
+`scripts/setup <site>` stops the previously active site (its data stays), writes `.env` from both files plus `WP_SITE`, `WP_HOST` and `WP_URL`, and sets the site up. Docker Compose reads the generated `.env`, so plain `docker compose` commands act on the active site. Every variable is required in its file; a missing, unknown or duplicate variable stops the setup with an error. A site needs no theme of its own: leave `WP_THEMES` empty and set `WP_ACTIVE_THEME` to a theme that ships with WordPress, such as `twentytwentyfive`.
 
 ## Usage
 
 ```sh
-cp .env.example .env      # set WP_THEMES, WP_PLUGINS, WP_ACTIVE_THEME; adjust host UID/GID if needed
-scripts/setup             # idempotent: build, composer install, start, install WordPress, activate theme and plugins
-scripts/reset             # stop everything, delete database and uploads, run setup again
+cp config.env.example config.env                  # adjust host UID/GID if needed
+cp sites/example.env.example sites/my-site.env    # set the projects of the site
+scripts/setup my-site     # idempotent: stop the other site, build, composer install, start, install WordPress, activate theme and plugins
+scripts/reset my-site     # stop the site if it is active, delete its database and uploads, run setup again
 ```
 
-`scripts/setup` runs `composer install` in every listed project that has a `composer.json`, then `npm ci` and `npm run build` (if the project defines it) in every project that has a `package.json` (a `package-lock.json` is required).
+`scripts/setup` runs `composer install` in every project of the site that has a `composer.json`, then `npm ci` and `npm run build` (if the project defines it) in every project that has a `package.json` (a `package-lock.json` is required).
 
 All services are reached through Traefik on host port 80 (must be free); `*.localhost` resolves to the loopback address in browsers and curl:
 
 | URL | Service |
 |---|---|
-| `http://wp-dev.localhost` | WordPress (`WP_URL`); admin credentials come from `.env` |
+| `http://<site>.localhost` | WordPress of the active site (`WP_URL`); admin credentials come from `config.env` |
 | `http://mailpit.localhost` | Mailpit web UI |
 | `http://traefik.localhost` | Traefik dashboard |
 
@@ -66,10 +79,11 @@ docker compose build --pull && docker compose up -d                          # u
 
 ## Rules
 
-- **WordPress core is never persisted.** `/var/www/html` is a tmpfs, so every container start copies the core fresh from the image. Only the database (`data/db`) and uploads (`data/uploads`) persist.
+- **WordPress core is never persisted.** `/var/www/html` is a tmpfs, so every container start copies the core fresh from the image. Only the database and uploads of each site (`data/sites/<site>/db`, `data/sites/<site>/uploads`) persist.
 - **Always the latest stable WordPress**, never beta: the image uses the floating `php8.5-apache` tag. Update with `docker compose build --pull`. Automatic core updates are disabled.
 - **The workspace is read-only in `wordpress`.** Project code cannot write into its own directory; only `tools` can write to the workspace.
 - **Containers write as the host user** (`HOST_UID`/`HOST_GID`), so `data/`, `vendor/` and `node_modules/` stay owned by the host user.
 - **Loopback requests work.** WordPress calls itself at `WP_URL` (WP-Cron, Site Health). Inside the container `WP_HOST` maps to `127.0.0.1` (bypassing Traefik) and Apache listens on port 80, so `HTTP_PORT` must be 80; `scripts/setup` fails if loopback requests do not work.
-- **Xdebug** is installed but only active when `XDEBUG_MODE` in `.env` is not `off`.
-- **Persistent object cache** only with `WP_OBJECT_CACHE=valkey` in `.env`: `scripts/setup` then starts `valkey` (profile `objectcache`) and the entrypoint copies the drop-in to `wp-content/object-cache.php`. Run `scripts/setup` after changing the variable; it recreates the containers and prints the object cache type. Without a reachable Valkey the drop-in stops WordPress with an error instead of falling back silently. For a plain `docker compose up`, add `--profile objectcache`.
+- **One site at a time.** All sites share the Compose project `wp-dev-env`; `scripts/setup <site>` stops the active one first.
+- **Xdebug** is installed but only active when `XDEBUG_MODE` in `config.env` is not `off`.
+- **Persistent object cache** only with `WP_OBJECT_CACHE=valkey` in the site file: `scripts/setup` then starts `valkey` (profile `objectcache`) and the entrypoint copies the drop-in to `wp-content/object-cache.php`. Run `scripts/setup` after changing the variable; it recreates the containers and prints the object cache type. Without a reachable Valkey the drop-in stops WordPress with an error instead of falling back silently. For a plain `docker compose up`, add `--profile objectcache`.
