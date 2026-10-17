@@ -1,6 +1,6 @@
 # CLAUDE.md – wp-dev-env
 
-General Docker development environment for WordPress themes and plugins; only Docker is needed on the host. It is for development only: tests, release tests and benchmarks run in a separate test environment (e.g. [wp-test-env](https://github.com/saijsaij/wp-test-env)), never against this site. It lives next to the projects it serves (the parent directory is the workspace, mounted as `/workspace`; projects may be nested in it). Every project gets a site (own database, uploads, caches, salts and host `<site>.localhost`), of type `vanilla` (WordPress of the image) or `bedrock` (a Bedrock site repository); one site runs at a time. The README is the user documentation; this file lists what matters when changing the environment.
+General Docker development environment for WordPress themes and plugins; only Docker is needed on the host. It is for development only: tests, release tests and benchmarks run in a separate test environment (e.g. [wp-test-env](https://github.com/webcodingcat/wp-test-env)), never against this site. It lives next to the projects it serves (the parent directory is the workspace, mounted as `/workspace`; projects may be nested in it). Every project gets a site (own database, uploads, caches, salts and host `<site>.localhost`), of type `vanilla` (WordPress of the image) or `bedrock` (a Bedrock site repository); one site runs at a time. The README is the user documentation; this file lists what matters when changing the environment.
 
 <!-- Maintainers: keep this file under 200 lines. -->
 

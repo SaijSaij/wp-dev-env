@@ -2,7 +2,7 @@
 
 Docker development environment for WordPress themes and plugins. Only Docker is required on the host.
 
-It is for developing: every project gets a **site** with its own database and uploads, which persist. One site runs at a time; switching takes one command. Tests, release tests and benchmarks belong in a test environment with fresh WordPress instances, such as [wp-test-env](https://github.com/saijsaij/wp-test-env), so they never change the development site.
+It is for developing: every project gets a **site** with its own database and uploads, which persist. One site runs at a time; switching takes one command. Tests, release tests and benchmarks belong in a test environment with fresh WordPress instances, such as [wp-test-env](https://github.com/webcodingcat/wp-test-env), so they never change the development site.
 
 - Latest stable WordPress on PHP 8.5 (official image), MariaDB, WP-CLI, Xdebug, Redis extension, optional persistent object cache (Valkey)
 - Traefik on port 80 with host names: `<site>.localhost`, `mailpit.localhost`, `traefik.localhost`
